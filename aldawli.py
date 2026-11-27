@@ -12,7 +12,7 @@ from http.server import ThreadingHTTPServer, BaseHTTPRequestHandler
 from pathlib import Path
 
 APP_TITLE = "الدولي للتحميلات"
-APP_VERSION = "10.18"
+APP_VERSION = "10.19"
 UPDATE_REPO = "momenhijazi0-debug/AlDawli-Downloads"
 UPDATE_MANIFEST_URL = f"https://raw.githubusercontent.com/{UPDATE_REPO}/main/version.json"
 UPDATE_SCRIPT_URL = f"https://raw.githubusercontent.com/{UPDATE_REPO}/main/aldawli.py"
@@ -3444,8 +3444,11 @@ class Handler(BaseHTTPRequestHandler):
 
     def guard(self, need_token=True):
         host = (self.headers.get("Host") or "").rsplit(":", 1)[0]
-        if host not in ("127.0.0.1", "localhost") or (
-                need_token and not hmac.compare_digest(self.headers.get("X-Token", ""), TOKEN)):
+        if host not in ("127.0.0.1", "localhost"):
+            self.send_any(403, {"error": "forbidden"}); return False
+        if need_token and not hmac.compare_digest(self.headers.get("X-Token", ""), TOKEN):
+            if self.path == "/api/ext/focus" and self.client_address and self.client_address[0] == "127.0.0.1":
+                return True
             self.send_any(403, {"error": "forbidden"}); return False
         return True
 
@@ -3681,6 +3684,9 @@ class Handler(BaseHTTPRequestHandler):
                 MGR.save()
             elif p == "/api/update/check": r = MGR.check_update(manual=True)
             elif p == "/api/update/apply": r = MGR.apply_update()
+            elif p == "/api/ext/focus":
+                threading.Thread(target=show_or_open_main_window, daemon=True).start()
+                r = {"ok": True}
             elif p == "/api/quit":
                 def bye():
                     try:
@@ -3696,7 +3702,37 @@ class Handler(BaseHTTPRequestHandler):
             self.send_any(400, {"error": explain(e)})
 
 
+def _focus_existing_main_window_only():
+    if platform.system() != "Windows":
+        return False
+    try:
+        user32 = ctypes.windll.user32
+        SW_RESTORE = 9
+        found = []
+        WNDENUMPROC = ctypes.WINFUNCTYPE(ctypes.c_bool, ctypes.c_void_p, ctypes.c_void_p)
+        def cb(hwnd, _lp):
+            if user32.IsWindowVisible(hwnd):
+                n = user32.GetWindowTextLengthW(hwnd)
+                if n > 0:
+                    buf = ctypes.create_unicode_buffer(n + 1)
+                    user32.GetWindowTextW(hwnd, buf, n + 1)
+                    title = buf.value
+                    if APP_TITLE in title and "معلومات ملف التحميل" not in title and "تحميل فيديو" not in title:
+                        if user32.IsIconic(hwnd):
+                            user32.ShowWindow(hwnd, SW_RESTORE)
+                        user32.SetForegroundWindow(hwnd)
+                        found.append(hwnd)
+                        return False
+            return True
+        user32.EnumWindows(WNDENUMPROC(cb), 0)
+        return bool(found)
+    except Exception:
+        return False
+
+
 def open_window(url):
+    if _focus_existing_main_window_only():
+        return
     exe = _find_chromium_exe()
     if not exe:
         _notify_no_browser()
@@ -3716,6 +3752,22 @@ def open_window(url):
     ])
     if platform.system() == "Windows":
         threading.Thread(target=apply_windows_taskbar_icon, daemon=True).start()
+
+
+def _try_focus_running_instance(base_port=8765):
+    for port in range(base_port, base_port + 30):
+        try:
+            req = rq.Request(
+                f"http://127.0.0.1:{port}/api/ext/focus",
+                data=b"{}",
+                headers={"Content-Type": "application/json", "Host": f"127.0.0.1:{port}"},
+            )
+            with rq.urlopen(req, timeout=1.2) as r:
+                if r.status == 200:
+                    return True
+        except Exception:
+            continue
+    return False
 
 
 def main():
@@ -3746,6 +3798,9 @@ def main():
             raise SystemExit(1)
     if a.magnet:
         if _send_magnet_to_running(a.magnet, a.port):
+            return
+    elif not a.no_window:
+        if _try_focus_running_instance(a.port):
             return
     set_windows_app_id()
     MGR = Manager()
@@ -3920,7 +3975,7 @@ textarea{min-height:120px;resize:vertical;direction:ltr;text-align:left}input.l{
 </style></head><body>
 <div class="app">
 <aside>
- <div class="brand"><img class="logo-img" src="/icon.png?v=3" alt="الدولي للتحميلات"><div><b>الدولي للتحميلات</b><small>الإصدار <span id="appVer">10.18</span></small></div></div>
+ <div class="brand"><img class="logo-img" src="/icon.png?v=3" alt="الدولي للتحميلات"><div><b>الدولي للتحميلات</b><small>الإصدار <span id="appVer">10.19</span></small></div></div>
  <button class="nav" data-f="video"><span data-ic="video"></span>تحميل فيديو</button>
  <button class="nav" data-f="upload"><span data-ic="upload"></span>مركز الرفع<em id="c-upload">0</em></button>
  <button class="nav" data-f="torrent"><span data-ic="magnet"></span>التورنت<em id="c-torrent">0</em></button>

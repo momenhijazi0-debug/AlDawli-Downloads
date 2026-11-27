@@ -1,5 +1,5 @@
 {
-  "version": "10.18",
-  "notes": "تحديث yt-dlp تلقائيًا، دعم Brave وVivaldi، ورسالة واضحة إذا لم يوجد متصفح Chromium.",
+  "version": "10.19",
+  "notes": "منع فتح نوافذ مكررة أو نسخ متعددة عند الضغط على التطبيق؛ التركيز على النافذة المفتوحة مسبقًا لتوفير الرامات.",
   "url": "https://raw.githubusercontent.com/momenhijazi0-debug/AlDawli-Downloads/main/aldawli.py"
 }
