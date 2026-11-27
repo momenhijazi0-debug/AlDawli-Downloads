@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-الدولي للتحميلات — مدير تنزيلات مستوحى من IDM + محمّل فيديوهات (يوتيوب، إنستغرام، تيك توك، فيسبوك...)
+الدولي للتحميلات — مدير تنزيلات سريع + محمّل فيديوهات (يوتيوب، إنستغرام، تيك توك، فيسبوك...)
 تنزيل مجزّأ ديناميكي + استئناف + تحديد سرعة + تحديث الرابط + ربط مع المتصفح + تحميل الفيديو والصوت
 التشغيل:  python aldawli.py
 إنشاء اختصار سطح المكتب:  python aldawli.py --shortcut
@@ -12,10 +12,11 @@ from http.server import ThreadingHTTPServer, BaseHTTPRequestHandler
 from pathlib import Path
 
 APP_TITLE = "الدولي للتحميلات"
-APP_VERSION = "10.6"
+APP_VERSION = "10.10"
 UPDATE_REPO = "momenhijazi0-debug/AlDawli-Downloads"
 UPDATE_MANIFEST_URL = f"https://raw.githubusercontent.com/{UPDATE_REPO}/main/version.json"
 UPDATE_SCRIPT_URL = f"https://raw.githubusercontent.com/{UPDATE_REPO}/main/aldawli.py"
+UPDATE_SETUP_URL = f"https://github.com/{UPDATE_REPO}/releases/latest/download/AlDawli_Setup.exe"
 CURRENT_PORT = 8765
 APP = Path.home() / ".aldawli"
 LEGACY_STATE = Path.home() / ".tahmeeli" / "state.json"
@@ -285,7 +286,7 @@ def register_magnet_protocol():
 
 
 def set_windows_autostart(enable=True):
-    """تفعيل أو تعطيل التشغيل التلقائي مع بدء الويندوز (في الخلفية بصينية النظام مثل IDM)."""
+    """تفعيل أو تعطيل التشغيل التلقائي مع بدء الويندوز (في الخلفية بصينية النظام)."""
     if platform.system() != "Windows":
         return False
     import winreg
@@ -351,7 +352,7 @@ def show_or_open_main_window():
 
 
 def start_windows_tray():
-    """إضافة أيقونة الدولي للتحميلات في صينية النظام (System Tray) بويندوز مثل IDM بدون أي مكتبات خارجية."""
+    """إضافة أيقونة الدولي للتحميلات في صينية النظام (System Tray) بويندوز بدون أي مكتبات خارجية."""
     if platform.system() != "Windows":
         return
 
@@ -531,7 +532,7 @@ def bring_title_to_front(title_substr, topmost=False):
 
 
 def open_popup_window(pid):
-    """فتح نافذة منبثقة صغيرة ومستقلة أمام المتصفح مباشرة (مثل IDM) لاختيار مكان الحفظ."""
+    """فتح نافذة منبثقة صغيرة ومستقلة أمام المتصفح مباشرة لاختيار مكان الحفظ."""
     url = f"http://127.0.0.1:{CURRENT_PORT}/popup?pid={pid}"
     exe = _find_chromium_exe()
     if not exe:
@@ -553,7 +554,7 @@ def open_popup_window(pid):
 
 
 def open_video_popup_window(vid):
-    """فتح نافذة منبثقة صغيرة أمام المتصفح مباشرة لاختيار جودة الفيديو ومكان الحفظ (مثل IDM)."""
+    """فتح نافذة منبثقة صغيرة أمام المتصفح مباشرة لاختيار جودة الفيديو ومكان الحفظ."""
     url = f"http://127.0.0.1:{CURRENT_PORT}/vpopup?vid={vid}"
     exe = _find_chromium_exe()
     if not exe:
@@ -2581,6 +2582,7 @@ class Manager:
             "available": False,
             "notes": "",
             "url": UPDATE_SCRIPT_URL,
+            "setup_url": UPDATE_SETUP_URL,
             "checking": False,
             "applying": False,
             "msg": "",
@@ -2904,12 +2906,14 @@ class Manager:
                 latest = str(data.get("version") or APP_VERSION).strip()
                 notes = str(data.get("notes") or "").strip()[:300]
                 dl_url = str(data.get("url") or UPDATE_SCRIPT_URL).strip()
+                setup_url = str(data.get("setup_url") or UPDATE_SETUP_URL).strip()
                 avail = _ver_tuple(latest) > _ver_tuple(APP_VERSION)
                 self.update_info.update({
                     "latest": latest,
                     "available": avail,
                     "notes": notes,
                     "url": dl_url,
+                    "setup_url": setup_url,
                     "msg": f"يتوفر تحديث جديد (v{latest})" if avail else ("أنت تستخدم أحدث إصدار بالفعل!" if manual else ""),
                 })
             except Exception as e:
@@ -2922,8 +2926,6 @@ class Manager:
         return self.update_info
 
     def apply_update(self):
-        if getattr(sys, "frozen", False):
-            raise RuntimeError("التحديث التلقائي المباشر يعمل مع نسخة aldawli.py فقط.")
         if self.update_info.get("applying"):
             return {"ok": True, "msg": "جارٍ التحديث بالفعل..."}
         self.update_info["applying"] = True
@@ -2941,13 +2943,28 @@ class Manager:
                     raise RuntimeError("الملف المُنزّل غير صالح.")
                 compile(new_text, "aldawli_update.py", "exec")
 
-                target = Path(__file__).resolve()
-                tmp = target.with_suffix(".py.new")
-                tmp.write_bytes(new_bytes)
-                os.replace(tmp, target)
-
-                # تحديث ملفات إضافة المتصفح (aldawli-ext) تلقائيًا من GitHub إن وُجدت
-                ext_dir = target.parent / "aldawli-ext"
+                if getattr(sys, "frozen", False):
+                    base_target = app_dir() / "aldawli.py"
+                    try:
+                        tmp = base_target.with_suffix(".py.new")
+                        tmp.write_bytes(new_bytes)
+                        os.replace(tmp, base_target)
+                        target = base_target
+                        # حذف أي نسخة قديمة في مجلد المستخدم إن نجح التحديث في مجلد التطبيق
+                        (APP / "aldawli.py").unlink(missing_ok=True)
+                    except PermissionError:
+                        APP.mkdir(parents=True, exist_ok=True)
+                        target = APP / "aldawli.py"
+                        tmp = target.with_suffix(".py.new")
+                        tmp.write_bytes(new_bytes)
+                        os.replace(tmp, target)
+                    ext_dir = app_dir() / "aldawli-ext"
+                else:
+                    target = Path(__file__).resolve()
+                    tmp = target.with_suffix(".py.new")
+                    tmp.write_bytes(new_bytes)
+                    os.replace(tmp, target)
+                    ext_dir = target.parent / "aldawli-ext"
                 ext_dir.mkdir(parents=True, exist_ok=True)
                 ext_updated = False
                 for ef in ("manifest.json", "background.js", "video_btn.js"):
@@ -2971,13 +2988,19 @@ class Manager:
 
                 # إغلاق المحركات وحفظ الحالة ثم إعادة تشغيل السكربت تلقائيًا
                 self.shutdown()
-                py_exe = sys.executable
                 creationflags = getattr(subprocess, "CREATE_NO_WINDOW", 0) if platform.system() == "Windows" else 0
-                subprocess.Popen(
-                    [py_exe, str(target), "--port", str(CURRENT_PORT), "--no-window"],
-                    cwd=str(target.parent),
-                    creationflags=creationflags,
-                )
+                if getattr(sys, "frozen", False):
+                    subprocess.Popen(
+                        [sys.executable, "--port", str(CURRENT_PORT), "--no-window"],
+                        cwd=str(app_dir()),
+                        creationflags=creationflags,
+                    )
+                else:
+                    subprocess.Popen(
+                        [sys.executable, str(target), "--port", str(CURRENT_PORT), "--no-window"],
+                        cwd=str(target.parent),
+                        creationflags=creationflags,
+                    )
                 time.sleep(0.4)
                 os._exit(0)
             except Exception as e:
@@ -3537,16 +3560,15 @@ textarea{min-height:120px;resize:vertical;direction:ltr;text-align:left}input.l{
 </style></head><body>
 <div class="app">
 <aside>
- <div class="brand"><img class="logo-img" src="/icon.png?v=3" alt="الدولي للتحميلات"><div><b>الدولي للتحميلات</b><small>الإصدار <span id="appVer">10.6</span></small></div></div>
- <button class="nav on" data-f="all"><span data-ic="all"></span>كل التنزيلات<em id="c-all">0</em></button>
- <button class="nav" data-f="active"><span data-ic="down"></span>قيد التنزيل<em id="c-active">0</em></button>
- <button class="nav" data-f="done"><span data-ic="ok"></span>المكتملة<em id="c-done">0</em></button>
- <button class="nav" data-f="stopped"><span data-ic="pause"></span>المتوقفة والفاشلة<em id="c-stopped">0</em></button>
- <div class="sep"></div>
+ <div class="brand"><img class="logo-img" src="/icon.png?v=3" alt="الدولي للتحميلات"><div><b>الدولي للتحميلات</b><small>الإصدار <span id="appVer">10.10</span></small></div></div>
  <button class="nav" data-f="video"><span data-ic="video"></span>تحميل فيديو</button>
  <button class="nav" data-f="upload"><span data-ic="upload"></span>مركز الرفع<em id="c-upload">0</em></button>
  <button class="nav" data-f="torrent"><span data-ic="magnet"></span>التورنت<em id="c-torrent">0</em></button>
  <button class="nav" data-f="soon"><span data-ic="spark"></span>قريبا</button>
+ <div class="sep"></div>
+ <button class="nav on" data-f="all"><span data-ic="all"></span>كل التنزيلات<em id="c-all">0</em></button>
+ <button class="nav" data-f="active"><span data-ic="down"></span>قيد التنزيل<em id="c-active">0</em></button>
+ <button class="nav" data-f="stopped"><span data-ic="pause"></span>المتوقفة والفاشلة<em id="c-stopped">0</em></button>
  <div class="sp"></div>
  <div class="speed"><small>السرعة الإجمالية</small><b id="spd">0 بايت/ث</b><span class="cap" id="spdCap"></span></div>
  <button class="nav" id="bSet"><span data-ic="set"></span>الإعدادات</button>
@@ -3696,8 +3718,8 @@ textarea{min-height:120px;resize:vertical;direction:ltr;text-align:left}input.l{
  <label for="sAct">أقصى عدد من التنزيلات المتزامنة</label><select id="sAct"></select>
  <label for="sSpd">حد السرعة الإجمالية (ك.ب/ث — 0 بدون حد)</label><input class="l" id="sSpd" type="number" min="0" step="50" placeholder="0">
  <label for="sHash">رمز حساب Catbox (Userhash — اختياري لحذف مرفوعاتك من السيرفر لاحقًا)</label><input class="l" id="sHash" placeholder="اتركه فارغًا للرفع المجهول المباشر">
- <label class="ucheck" style="margin-top:12px"><input type="checkbox" id="sConf"><span>إظهار نافذة «معلومات ملف التحميل» قبل بدء التنزيل (مثل IDM)</span></label>
- <label class="ucheck" style="margin-top:8px"><input type="checkbox" id="sAuto"><span>تشغيل الدولي تلقائيًا مع بدء الويندوز (في صينية النظام مثل IDM)</span></label>
+ <label class="ucheck" style="margin-top:12px"><input type="checkbox" id="sConf"><span>إظهار نافذة «معلومات ملف التحميل» قبل بدء التنزيل</span></label>
+ <label class="ucheck" style="margin-top:8px"><input type="checkbox" id="sAuto"><span>تشغيل الدولي تلقائيًا مع بدء الويندوز (في صينية النظام)</span></label>
  <label class="ucheck" style="margin-top:8px"><input type="checkbox" id="sVidBtn"><span>إظهار زر التحميل العائم على زاوية الفيديوهات في المتصفح</span></label>
  <div class="row">
   <button class="btn pri" id="okSet">حفظ</button>
@@ -3815,8 +3837,8 @@ const B=n=>{if(n<0||n===undefined||n===null)return'—';const u=['بايت','ك.
 const D=s=>{s=Math.round(s);const h=s/3600|0,m=s%3600/60|0,x=s%60,p=v=>String(v).padStart(2,'0');return h?`${h}:${p(m)}:${p(x)}`:`${p(m)}:${p(x)}`};
 const esc=s=>String(s||'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 const ST={queued:'في الانتظار',connecting:'جارٍ الاتصال',downloading:'قيد التنزيل',paused:'متوقف مؤقتًا',completed:'مكتمل',error:'فشل'};
-const F={all:()=>1,active:i=>['queued','connecting','downloading'].includes(i.status),done:i=>i.status==='completed',stopped:i=>['paused','error'].includes(i.status)};
-const TT={all:'كل التنزيلات',active:'قيد التنزيل',done:'المكتملة',stopped:'المتوقفة والفاشلة',video:'تحميل فيديو',upload:'مركز الرفع',torrent:'التورنت',soon:'قريبا'};
+const F={all:()=>1,active:i=>['queued','connecting','downloading'].includes(i.status),stopped:i=>['paused','error'].includes(i.status)};
+const TT={all:'كل التنزيلات',active:'قيد التنزيل',stopped:'المتوقفة والفاشلة',video:'تحميل فيديو',upload:'مركز الرفع',torrent:'التورنت',soon:'قريبا'};
 const UST={processing:'جارٍ تجهيز الفيديو',uploading:'جارٍ الرفع',completed:'تم الرفع',error:'فشل',cancelled:'ملغى'};
 const CAT=[['#d98a00','zip rar 7z tar gz bz2 xz iso'],['#d6336c','mp4 mkv avi mov webm flv'],['#8f4fe0','mp3 flac wav aac ogg m4a'],['#1c9a5a','jpg jpeg png gif webp svg bmp'],['#2447d6','pdf doc docx xls xlsx ppt pptx txt epub'],['#0d9488','exe msi dmg pkg apk deb']];
 const col=e=>(CAT.find(c=>c[1].split(' ').includes(e))||['#667386'])[0];

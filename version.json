@@ -1,5 +1,5 @@
 {
-  "version": "10.6",
-  "notes": "تحديث ملفات إضافة المتصفح (aldawli-ext) تلقائيًا من GitHub مع إشعار تنبيهي + خيار إخفاء/إظهار زر التحميل العائم على الفيديوهات من الإعدادات.",
+  "version": "10.10",
+  "notes": "إزالة قائمة «المكتملة» وإعادة ترتيب القائمة الجانبية لرفع أقسام الفيديو والرفع والتورنت للأعلى.",
   "url": "https://raw.githubusercontent.com/momenhijazi0-debug/AlDawli-Downloads/main/aldawli.py"
 }
