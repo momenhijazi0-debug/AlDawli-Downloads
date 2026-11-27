@@ -12,7 +12,7 @@ from http.server import ThreadingHTTPServer, BaseHTTPRequestHandler
 from pathlib import Path
 
 APP_TITLE = "الدولي للتحميلات"
-APP_VERSION = "10.19"
+APP_VERSION = "10.20"
 UPDATE_REPO = "momenhijazi0-debug/AlDawli-Downloads"
 UPDATE_MANIFEST_URL = f"https://raw.githubusercontent.com/{UPDATE_REPO}/main/version.json"
 UPDATE_SCRIPT_URL = f"https://raw.githubusercontent.com/{UPDATE_REPO}/main/aldawli.py"
@@ -3531,6 +3531,8 @@ class Handler(BaseHTTPRequestHandler):
                 self.send_any(200, {"show_video_btn": bool(MGR.settings.get("show_video_btn", True))})
         elif clean_path == "/api/state":
             if self.guard(): self.send_any(200, MGR.state())
+        elif clean_path == "/api/speedtest":
+            if self.guard(): self.send_any(200, get_speedtest_status())
         else:
             self.send_any(404, {"error": "not found"})
 
@@ -3687,6 +3689,8 @@ class Handler(BaseHTTPRequestHandler):
             elif p == "/api/ext/focus":
                 threading.Thread(target=show_or_open_main_window, daemon=True).start()
                 r = {"ok": True}
+            elif p == "/api/speedtest":
+                r = start_speedtest_job()
             elif p == "/api/quit":
                 def bye():
                     try:
@@ -3768,6 +3772,178 @@ def _try_focus_running_instance(base_port=8765):
         except Exception:
             continue
     return False
+
+
+_SPEEDTEST_STATE = {
+    "running": False,
+    "phase": "idle",       # idle | ping | download | upload | done | error
+    "ping_ms": None,
+    "jitter_ms": None,
+    "download_bps": 0.0,
+    "upload_bps": 0.0,
+    "progress": 0,
+    "error": "",
+    "ts": 0,
+}
+_SPEEDTEST_LOCK = threading.Lock()
+
+
+def _measure_ping_ms(host="1.1.1.1", port=443, count=5, timeout=2.5):
+    samples = []
+    for _ in range(count):
+        t0 = time.perf_counter()
+        try:
+            with socket.create_connection((host, port), timeout=timeout):
+                samples.append((time.perf_counter() - t0) * 1000.0)
+        except Exception:
+            continue
+    if not samples:
+        # Fallback to Cloudflare speed endpoint TCP connect
+        for _ in range(count):
+            t0 = time.perf_counter()
+            try:
+                with socket.create_connection(("speed.cloudflare.com", 443), timeout=timeout):
+                    samples.append((time.perf_counter() - t0) * 1000.0)
+            except Exception:
+                continue
+    if not samples:
+        return None, None
+    avg_ms = sum(samples) / len(samples)
+    jitter_ms = (max(samples) - min(samples)) if len(samples) > 1 else 0.0
+    return round(avg_ms, 1), round(jitter_ms, 1)
+
+
+def _measure_download_bps(duration_sec=6.0):
+    endpoints = [
+        "https://speed.cloudflare.com/__down?bytes=100000000",
+        "https://ash-speed.hetzner.com/100MB.bin",
+        "https://proof.ovh.net/files/100Mb.dat",
+    ]
+    ctx = ssl.create_default_context()
+    total_bytes = 0
+    t_start = time.perf_counter()
+    deadline = t_start + duration_sec
+
+    for url in endpoints:
+        if time.perf_counter() >= deadline:
+            break
+        try:
+            req = rq.Request(url, headers={"User-Agent": UA, "Accept-Encoding": "identity"})
+            with rq.urlopen(req, timeout=8, context=ctx) as resp:
+                while time.perf_counter() < deadline:
+                    chunk = resp.read(131072)
+                    if not chunk:
+                        break
+                    total_bytes += len(chunk)
+                    elapsed = max(time.perf_counter() - t_start, 0.05)
+                    with _SPEEDTEST_LOCK:
+                        _SPEEDTEST_STATE["download_bps"] = total_bytes / elapsed
+                        _SPEEDTEST_STATE["progress"] = min(80, 15 + int(min(1.0, (time.perf_counter() - t_start) / duration_sec) * 65))
+            if total_bytes >= 2 * 1024 * 1024 and (time.perf_counter() - t_start) >= 2.0:
+                break
+        except Exception:
+            continue
+
+    elapsed = max(time.perf_counter() - t_start, 0.05)
+    return (total_bytes / elapsed) if total_bytes > 0 else 0.0
+
+
+def _measure_upload_bps(duration_sec=4.0):
+    payload_chunk = b"0" * (256 * 1024)  # 256 KB
+    max_chunks = 64  # up to 16 MB
+    total_sent = 0
+    t_start = time.perf_counter()
+    deadline = t_start + duration_sec
+    ctx = ssl.create_default_context()
+
+    for _ in range(max_chunks):
+        if time.perf_counter() >= deadline:
+            break
+        conn = None
+        try:
+            conn = http.client.HTTPSConnection("speed.cloudflare.com", 443, timeout=7, context=ctx)
+            conn.putrequest("POST", "/__up")
+            conn.putheader("User-Agent", UA)
+            conn.putheader("Content-Type", "application/octet-stream")
+            conn.putheader("Content-Length", str(len(payload_chunk)))
+            conn.putheader("Connection", "close")
+            conn.endheaders()
+            conn.send(payload_chunk)
+            resp = conn.getresponse()
+            resp.read()
+            total_sent += len(payload_chunk)
+            elapsed = max(time.perf_counter() - t_start, 0.05)
+            with _SPEEDTEST_LOCK:
+                _SPEEDTEST_STATE["upload_bps"] = total_sent / elapsed
+                _SPEEDTEST_STATE["progress"] = min(99, 80 + int(min(1.0, (time.perf_counter() - t_start) / duration_sec) * 19))
+        except Exception:
+            break
+        finally:
+            if conn:
+                try:
+                    conn.close()
+                except Exception:
+                    pass
+
+    elapsed = max(time.perf_counter() - t_start, 0.05)
+    return (total_sent / elapsed) if total_sent > 0 else 0.0
+
+
+def start_speedtest_job():
+    with _SPEEDTEST_LOCK:
+        if _SPEEDTEST_STATE["running"]:
+            return dict(_SPEEDTEST_STATE)
+        _SPEEDTEST_STATE.update({
+            "running": True,
+            "phase": "ping",
+            "ping_ms": None,
+            "jitter_ms": None,
+            "download_bps": 0.0,
+            "upload_bps": 0.0,
+            "progress": 5,
+            "error": "",
+            "ts": time.time(),
+        })
+
+    def _worker():
+        try:
+            ping_ms, jitter_ms = _measure_ping_ms()
+            with _SPEEDTEST_LOCK:
+                _SPEEDTEST_STATE["ping_ms"] = ping_ms
+                _SPEEDTEST_STATE["jitter_ms"] = jitter_ms
+                _SPEEDTEST_STATE["phase"] = "download"
+                _SPEEDTEST_STATE["progress"] = 15
+
+            dl_bps = _measure_download_bps(duration_sec=5.5)
+            with _SPEEDTEST_LOCK:
+                _SPEEDTEST_STATE["download_bps"] = dl_bps
+                _SPEEDTEST_STATE["phase"] = "upload"
+                _SPEEDTEST_STATE["progress"] = 80
+
+            ul_bps = _measure_upload_bps(duration_sec=3.5)
+            with _SPEEDTEST_LOCK:
+                _SPEEDTEST_STATE["upload_bps"] = ul_bps
+                _SPEEDTEST_STATE["progress"] = 100
+                _SPEEDTEST_STATE["phase"] = "done"
+                _SPEEDTEST_STATE["running"] = False
+                _SPEEDTEST_STATE["ts"] = time.time()
+                if dl_bps <= 0 and ul_bps <= 0:
+                    _SPEEDTEST_STATE["error"] = "تعذّر إتمام اختبار السرعة — تأكد من الاتصال بالإنترنت."
+        except Exception as e:
+            with _SPEEDTEST_LOCK:
+                _SPEEDTEST_STATE["error"] = explain(e)
+                _SPEEDTEST_STATE["phase"] = "error"
+                _SPEEDTEST_STATE["running"] = False
+                _SPEEDTEST_STATE["ts"] = time.time()
+
+    threading.Thread(target=_worker, daemon=True).start()
+    with _SPEEDTEST_LOCK:
+        return dict(_SPEEDTEST_STATE)
+
+
+def get_speedtest_status():
+    with _SPEEDTEST_LOCK:
+        return dict(_SPEEDTEST_STATE)
 
 
 def main():
@@ -3943,6 +4119,14 @@ header h1{font-size:22px;margin:0;margin-inline-end:auto}
 .uplayer video{width:100%;max-height:360px;display:block}
 #torrentView{padding:16px 24px 28px;overflow:auto;flex:1;display:none;flex-direction:column;gap:16px}
 #soonView{padding:16px 24px 28px;overflow:auto;flex:1;display:none;flex-direction:column;gap:16px}
+#speedtestView{padding:16px 24px 28px;overflow:auto;flex:1;display:none;flex-direction:column;gap:16px}
+.st-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(190px,1fr));gap:12px;margin:16px 0}
+.st-box{background:var(--bg);border:1px solid var(--ln);border-radius:14px;padding:16px;text-align:center}
+.st-box small{display:block;color:var(--mu);font-size:12.5px;margin-bottom:4px}
+.st-box b{font-size:22px;color:var(--ac);display:block;direction:ltr}
+.st-box em{display:block;font-style:normal;font-size:12px;color:var(--mu);margin-top:2px;direction:ltr}
+.st-prog-wrap{height:10px;background:var(--ln);border-radius:99px;overflow:hidden;margin:12px 0 6px}
+.st-prog-bar{height:100%;width:0%;background:var(--ac);transition:width .25s ease}
 #tList{display:flex;flex-direction:column;gap:10px;max-width:860px;width:100%;margin:0 auto}
 
 dialog{border:1px solid var(--ln);border-radius:16px;background:var(--sf);color:var(--tx);padding:22px;width:min(540px,92vw)}
@@ -3975,11 +4159,12 @@ textarea{min-height:120px;resize:vertical;direction:ltr;text-align:left}input.l{
 </style></head><body>
 <div class="app">
 <aside>
- <div class="brand"><img class="logo-img" src="/icon.png?v=3" alt="الدولي للتحميلات"><div><b>الدولي للتحميلات</b><small>الإصدار <span id="appVer">10.19</span></small></div></div>
+ <div class="brand"><img class="logo-img" src="/icon.png?v=3" alt="الدولي للتحميلات"><div><b>الدولي للتحميلات</b><small>الإصدار <span id="appVer">10.20</span></small></div></div>
  <button class="nav" data-f="video"><span data-ic="video"></span>تحميل فيديو</button>
  <button class="nav" data-f="upload"><span data-ic="upload"></span>مركز الرفع<em id="c-upload">0</em></button>
  <button class="nav" data-f="torrent"><span data-ic="magnet"></span>التورنت<em id="c-torrent">0</em></button>
  <button class="nav" data-f="soon"><span data-ic="spark"></span>قريبا</button>
+ <button class="nav" data-f="speedtest"><span data-ic="gauge"></span>قياس السرعة</button>
  <div class="sep"></div>
  <button class="nav on" data-f="all"><span data-ic="all"></span>كل التنزيلات<em id="c-all">0</em></button>
  <button class="nav" data-f="active"><span data-ic="down"></span>قيد التنزيل<em id="c-active">0</em></button>
@@ -4108,6 +4293,29 @@ textarea{min-height:120px;resize:vertical;direction:ltr;text-align:left}input.l{
   <div class="ucard" style="text-align:center;padding:48px 24px">
    <h2 style="font-size:24px;margin-bottom:8px">قريبًا...</h2>
    <p style="margin:0">ميزات جديدة قيد التطوير! تم الوصول لهذا القسم بنجاح عبر نظام التحديث التلقائي (الإصدار 10.1).</p>
+  </div>
+ </section>
+
+ <section id="speedtestView">
+  <div class="ucard">
+   <div style="display:flex;align-items:center;justify-content:space-between;gap:12px;flex-wrap:wrap">
+    <div>
+     <h2 style="margin:0 0 4px">قياس سرعة الإنترنت الفعلية</h2>
+     <p style="margin:0">اختبار حقيقي للـ Ping وسرعة التنزيل والرفع الفعلية من جهازك.</p>
+    </div>
+    <button class="btn pri" id="bRunSpeedtest"><span data-ic="gauge"></span>بدء قياس السرعة</button>
+   </div>
+   <div class="st-prog-wrap"><div class="st-prog-bar" id="stProgBar"></div></div>
+   <div style="display:flex;justify-content:space-between;font-size:12.5px;color:var(--mu)">
+    <span id="stPhaseTxt">جاهز للاختبار</span>
+    <span id="stPctTxt">0%</span>
+   </div>
+   <div class="st-grid">
+    <div class="st-box"><small>سرعة التنزيل (Download)</small><b id="stDlMbps">— Mbps</b><em id="stDlMBs">— MB/s</em></div>
+    <div class="st-box"><small>سرعة الرفع (Upload)</small><b id="stUlMbps">— Mbps</b><em id="stUlMBs">— MB/s</em></div>
+    <div class="st-box"><small>زمن الاستجابة (Ping)</small><b id="stPing">— ms</b><em id="stJitter">Jitter: — ms</em></div>
+   </div>
+   <div id="stErrTxt" style="color:var(--er);font-size:13px"></div>
   </div>
  </section>
 </main></div>
@@ -4241,14 +4449,15 @@ ext:'<path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"/><path d
 retry:'<path d="M3 12a9 9 0 1 0 3-6.7L3 8"/><path d="M3 3v5h5"/>',
 x:'<path d="M18 6L6 18M6 6l12 12"/>',
 magnet:'<path d="M6 15V6a2 2 0 0 1 2-2h1v6H8v5a4 4 0 0 0 8 0v-5h-1V4h1a2 2 0 0 1 2 2v9a6 6 0 0 1-12 0z"/>',
-spark:'<path d="M12 3l1.9 5.1L19 10l-5.1 1.9L12 17l-1.9-5.1L5 10l5.1-1.9L12 3z"/>'};
+spark:'<path d="M12 3l1.9 5.1L19 10l-5.1 1.9L12 17l-1.9-5.1L5 10l5.1-1.9L12 3z"/>',
+gauge:'<path d="M12 14l4-4"/><path d="M3.34 19a10 10 0 1 1 17.32 0"/>'};
 document.querySelectorAll('[data-ic]').forEach(e=>e.insertAdjacentHTML('afterbegin',sv(I[e.dataset.ic])));
 const B=n=>{if(n<0||n===undefined||n===null)return'—';const u=['بايت','ك.ب','م.ب','ج.ب','ت.ب'];let i=0;while(n>=1024&&i<4){n/=1024;i++}return(i?n.toFixed(n<10?2:1):Math.round(n))+' '+u[i]};
 const D=s=>{s=Math.round(s);const h=s/3600|0,m=s%3600/60|0,x=s%60,p=v=>String(v).padStart(2,'0');return h?`${h}:${p(m)}:${p(x)}`:`${p(m)}:${p(x)}`};
 const esc=s=>String(s||'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 const ST={queued:'في الانتظار',connecting:'جارٍ الاتصال',downloading:'قيد التنزيل',paused:'متوقف مؤقتًا',completed:'مكتمل',error:'فشل'};
 const F={all:()=>1,active:i=>['queued','connecting','downloading'].includes(i.status),stopped:i=>['paused','error'].includes(i.status)};
-const TT={all:'كل التنزيلات',active:'قيد التنزيل',stopped:'المتوقفة والفاشلة',video:'تحميل فيديو',upload:'مركز الرفع',torrent:'التورنت',soon:'قريبا'};
+const TT={all:'كل التنزيلات',active:'قيد التنزيل',stopped:'المتوقفة والفاشلة',video:'تحميل فيديو',upload:'مركز الرفع',torrent:'التورنت',soon:'قريبا',speedtest:'قياس السرعة'};
 const UST={processing:'جارٍ تجهيز الفيديو',uploading:'جارٍ الرفع',completed:'تم الرفع',error:'فشل',cancelled:'ملغى'};
 const CAT=[['#d98a00','zip rar 7z tar gz bz2 xz iso'],['#d6336c','mp4 mkv avi mov webm flv'],['#8f4fe0','mp3 flac wav aac ogg m4a'],['#1c9a5a','jpg jpeg png gif webp svg bmp'],['#2447d6','pdf doc docx xls xlsx ppt pptx txt epub'],['#0d9488','exe msi dmg pkg apk deb']];
 const col=e=>(CAT.find(c=>c[1].split(' ').includes(e))||['#667386'])[0];
@@ -4260,13 +4469,15 @@ const act=async(p,b)=>{try{await api(p,b||{});await tick(true)}catch(e){toast(e.
 function setTab(name){
  flt=name;
  document.querySelectorAll('.nav[data-f]').forEach(x=>x.classList.toggle('on',x.dataset.f===name));
- const isV=name==='video',isU=name==='upload',isT=name==='torrent',isS=name==='soon';
+ const isV=name==='video',isU=name==='upload',isT=name==='torrent',isS=name==='soon',isSt=name==='speedtest';
  $('#videoView').style.display=isV?'flex':'none';
  $('#uploadView').style.display=isU?'flex':'none';
  $('#torrentView').style.display=isT?'flex':'none';
  $('#soonView').style.display=isS?'flex':'none';
- $('#list').style.display=(isV||isU||isT||isS)?'none':'flex';
- if(isV||isU||isT||isS)$('#empty').style.display='none';
+ $('#speedtestView').style.display=isSt?'flex':'none';
+ $('#list').style.display=(isV||isU||isT||isS||isSt)?'none':'flex';
+ if(isV||isU||isT||isS||isSt)$('#empty').style.display='none';
+ if(isSt)pollSpeedtest();
  if(isV && !$('#vDir').value && S.settings)$('#vDir').value=S.settings.last_dir||S.settings.dir||'';
  if(isT && S.torrent_engine && S.torrent_engine.ready && !S.torrent_engine.running){api('/api/torrent/start_engine',{}).then(()=>tick(true)).catch(()=>{})}
  render();
@@ -4667,7 +4878,7 @@ function render(){
  renderTorrents();
  renderUpdate();
  $('#extBar').style.display=(S.settings&&S.settings.ext_updated_notice)?'flex':'none';
- if(flt==='video'||flt==='upload'||flt==='torrent'||flt==='soon')return;
+ if(flt==='video'||flt==='upload'||flt==='torrent'||flt==='soon'||flt==='speedtest')return;
  const vis=S.items.filter(F[flt]),ids=new Set(vis.map(i=>i.id)),list=$('#list');
  for(const[id,el]of els)if(!ids.has(id)){el.remove();els.delete(id)}
  vis.forEach((it,k)=>{let el=els.get(it.id);if(!el){el=make(it);els.set(it.id,el)}upd(el,it);if(list.children[k]!==el)list.insertBefore(el,list.children[k]||null)});
@@ -4921,6 +5132,42 @@ $('#bRegMag').onclick=async()=>{try{const r=await api('/api/register_magnet',{})
 $('#bDeskSc').onclick=async()=>{try{await api('/api/create_shortcut',{});toast('تم إنشاء اختصار «الدولي للتحميلات» على سطح المكتب!')}catch(e){toast(e.message)}};
 $('#bDisExt').onclick=()=>act('/api/dismiss_ext_notice');
 $('#bQuit').onclick=async()=>{try{await api('/api/quit',{})}catch(e){}$('#bye').style.display='grid'};
+
+const PHASE_AR={idle:'جاهز للاختبار',ping:'جارٍ قياس زمن الاستجابة (Ping)...',download:'جارٍ قياس سرعة التنزيل الفعلية...',upload:'جارٍ قياس سرعة الرفع الفعلية...',done:'اكتمل القياس بنجاح!',error:'حدث خطأ أثناء القياس'};
+const fmtMbps=bps=>((Number(bps||0)*8)/1e6).toFixed(2)+' Mbps';
+const fmtMBs=bps=>((Number(bps||0))/(1024*1024)).toFixed(2)+' MB/s';
+let stTimer=null;
+function renderSpeedtest(st){
+ if(!st)return;
+ const pct=Math.max(0,Math.min(100,Number(st.progress||0)));
+ $('#stProgBar').style.width=pct+'%';
+ $('#stPctTxt').textContent=pct+'%';
+ $('#stPhaseTxt').textContent=PHASE_AR[st.phase]||st.phase||'';
+ $('#stDlMbps').textContent=st.download_bps>0?fmtMbps(st.download_bps):(st.phase==='done'?'0.00 Mbps':'— Mbps');
+ $('#stDlMBs').textContent=st.download_bps>0?fmtMBs(st.download_bps):(st.phase==='done'?'0.00 MB/s':'— MB/s');
+ $('#stUlMbps').textContent=st.upload_bps>0?fmtMbps(st.upload_bps):(st.phase==='done'?'0.00 Mbps':'— Mbps');
+ $('#stUlMBs').textContent=st.upload_bps>0?fmtMBs(st.upload_bps):(st.phase==='done'?'0.00 MB/s':'— MB/s');
+ $('#stPing').textContent=(st.ping_ms!==null&&st.ping_ms!==undefined)?(st.ping_ms+' ms'):'— ms';
+ $('#stJitter').textContent='Jitter: '+((st.jitter_ms!==null&&st.jitter_ms!==undefined)?(st.jitter_ms+' ms'):'— ms');
+ $('#stErrTxt').textContent=st.error||'';
+ const btn=$('#bRunSpeedtest');
+ if(btn){btn.disabled=!!st.running;btn.textContent=st.running?'جارٍ القياس...':'بدء قياس السرعة'}
+}
+async function pollSpeedtest(){
+ try{
+  const st=await api('/api/speedtest');
+  renderSpeedtest(st);
+  if(st.running && flt==='speedtest'){clearTimeout(stTimer);stTimer=setTimeout(pollSpeedtest,400)}
+ }catch(e){}
+}
+const bRunSt=$('#bRunSpeedtest');
+if(bRunSt)bRunSt.onclick=async()=>{
+ try{
+  const st=await api('/api/speedtest',{});
+  renderSpeedtest(st);
+  clearTimeout(stTimer);stTimer=setTimeout(pollSpeedtest,400);
+ }catch(e){toast(e.message)}
+};
 tick();
 </script></body></html>'''
 

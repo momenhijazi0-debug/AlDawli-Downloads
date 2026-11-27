@@ -1,5 +1,5 @@
 {
-  "version": "10.19",
-  "notes": "منع فتح نوافذ مكررة أو نسخ متعددة عند الضغط على التطبيق؛ التركيز على النافذة المفتوحة مسبقًا لتوفير الرامات.",
+  "version": "10.20",
+  "notes": "إضافة تبويب وقائمة «قياس السرعة» لقياس الـ Ping وسرعة التنزيل والرفع الفعلية مباشرة من التطبيق.",
   "url": "https://raw.githubusercontent.com/momenhijazi0-debug/AlDawli-Downloads/main/aldawli.py"
 }
