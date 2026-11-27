@@ -12,7 +12,7 @@ from http.server import ThreadingHTTPServer, BaseHTTPRequestHandler
 from pathlib import Path
 
 APP_TITLE = "الدولي للتحميلات"
-APP_VERSION = "10.24"
+APP_VERSION = "10.23"
 UPDATE_REPO = "momenhijazi0-debug/AlDawli-Downloads"
 UPDATE_MANIFEST_URL = f"https://raw.githubusercontent.com/{UPDATE_REPO}/main/version.json"
 UPDATE_SCRIPT_URL = f"https://raw.githubusercontent.com/{UPDATE_REPO}/main/aldawli.py"
@@ -690,34 +690,13 @@ def _run_webview_main(wv, url, hidden=False):
             win.events.closing += _on_closing
             threading.Thread(target=apply_windows_taskbar_icon, daemon=True).start()
 
-        wv_data_dir = APP / f"webview_profile_{os.getpid()}"
-        try:
-            wv_data_dir.mkdir(parents=True, exist_ok=True)
-        except Exception:
-            pass
-        if is_win:
-            # عزل بيانات WebView2 عن ملفات Microsoft Edge وتفادي إغلاق العملية عند إنهاء Edge
-            cur_args = os.environ.get("WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS", "")
-            iso_args = f'--user-data-dir="{wv_data_dir}" --disable-features=msEdgeShareWithEdge'
-            if str(wv_data_dir) not in cur_args:
-                os.environ["WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS"] = (cur_args + " " + iso_args).strip()
-
-        def _cleanup_wv_dir():
-            time.sleep(1.5)
-            try:
-                import shutil
-                shutil.rmtree(wv_data_dir, ignore_errors=True)
-            except Exception:
-                pass
-
         start_kw = {}
         if is_win:
             start_kw["gui"] = "edgechromium"      # يمنع الرجوع لمحرّك IE القديم
         try:
-            wv.start(private_mode=False, storage_path=str(wv_data_dir), **start_kw)
+            wv.start(private_mode=False, storage_path=str(APP / "webview_data"), **start_kw)
         except TypeError:
             wv.start(**start_kw)
-        threading.Thread(target=_cleanup_wv_dir, daemon=True).start()
     except Exception as e:
         print("pywebview failed, falling back to browser app-mode:", e)
         _WV["mod"], _WV["main"] = None, None
@@ -4184,9 +4163,6 @@ def main():
                 for p in tmp_root.glob("_MEI*"):
                     if p.is_dir() and p.name != my_mei:
                         shutil.rmtree(p, ignore_errors=True)
-                for wp in APP.glob("webview_profile_*"):
-                    if wp.is_dir() and not wp.name.endswith(f"_{os.getpid()}"):
-                        shutil.rmtree(wp, ignore_errors=True)
             except Exception:
                 pass
         threading.Thread(target=_clean_old_mei, daemon=True).start()
@@ -4356,7 +4332,7 @@ textarea{min-height:120px;resize:vertical;direction:ltr;text-align:left}input.l{
 </style></head><body>
 <div class="app">
 <aside>
- <div class="brand"><img class="logo-img" src="/icon.png?v=3" alt="الدولي للتحميلات"><div><b>الدولي للتحميلات</b><small>الإصدار <span id="appVer">10.24</span></small></div></div>
+ <div class="brand"><img class="logo-img" src="/icon.png?v=3" alt="الدولي للتحميلات"><div><b>الدولي للتحميلات</b><small>الإصدار <span id="appVer">10.23</span></small></div></div>
  <button class="nav" data-f="video"><span data-ic="video"></span>تحميل فيديو</button>
  <button class="nav" data-f="upload"><span data-ic="upload"></span>مركز الرفع<em id="c-upload">0</em></button>
  <button class="nav" data-f="torrent"><span data-ic="magnet"></span>التورنت<em id="c-torrent">0</em></button>
