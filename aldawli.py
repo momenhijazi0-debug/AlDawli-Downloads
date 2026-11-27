@@ -12,7 +12,7 @@ from http.server import ThreadingHTTPServer, BaseHTTPRequestHandler
 from pathlib import Path
 
 APP_TITLE = "الدولي للتحميلات"
-APP_VERSION = "10.3"
+APP_VERSION = "10.4"
 UPDATE_REPO = "momenhijazi0-debug/AlDawli-Downloads"
 UPDATE_MANIFEST_URL = f"https://raw.githubusercontent.com/{UPDATE_REPO}/main/version.json"
 UPDATE_SCRIPT_URL = f"https://raw.githubusercontent.com/{UPDATE_REPO}/main/aldawli.py"
@@ -233,7 +233,7 @@ def _save_lnk_unicode(lnk_path, target_path, arguments, working_dir, icon_path, 
 
 
 def register_magnet_protocol():
-    """تسجيل الدولي للتحميلات كبرنامج افتراضي لروابط magnet: في ويندوز (بدون الحاجة لصلاحيات مسؤول)."""
+    """تسجيل الدولي للتحميلات كبرنامج افتراضي لروابط magnet: في ويندوز."""
     if platform.system() != "Windows":
         raise RuntimeError("تسجيل بروتوكول Magnet مدعوم على نظام Windows فقط")
     import winreg
@@ -247,15 +247,231 @@ def register_magnet_protocol():
         script_path = Path(__file__).resolve()
         cmd_str = f'"{runner}" "{script_path}" --magnet "%1"'
 
-    base = r"Software\Classes\magnet"
-    with winreg.CreateKey(winreg.HKEY_CURRENT_USER, base) as k:
-        winreg.SetValueEx(k, "", 0, winreg.REG_SZ, f"URL:{APP_TITLE}")
-        winreg.SetValueEx(k, "URL Protocol", 0, winreg.REG_SZ, "")
-    with winreg.CreateKey(winreg.HKEY_CURRENT_USER, base + r"\DefaultIcon") as k:
-        winreg.SetValueEx(k, "", 0, winreg.REG_SZ, f'"{ico_path}",0')
-    with winreg.CreateKey(winreg.HKEY_CURRENT_USER, base + r"\shell\open\command") as k:
-        winreg.SetValueEx(k, "", 0, winreg.REG_SZ, cmd_str)
+    for base in (r"Software\Classes\magnet", r"Software\Classes\AlDawli.Magnet"):
+        with winreg.CreateKey(winreg.HKEY_CURRENT_USER, base) as k:
+            winreg.SetValueEx(k, "", 0, winreg.REG_SZ, f"URL:{APP_TITLE}")
+            winreg.SetValueEx(k, "URL Protocol", 0, winreg.REG_SZ, "")
+        with winreg.CreateKey(winreg.HKEY_CURRENT_USER, base + r"\DefaultIcon") as k:
+            winreg.SetValueEx(k, "", 0, winreg.REG_SZ, f'"{ico_path}",0')
+        with winreg.CreateKey(winreg.HKEY_CURRENT_USER, base + r"\shell\open\command") as k:
+            winreg.SetValueEx(k, "", 0, winreg.REG_SZ, cmd_str)
+
+    # تسجيل التطبيق في قائمة التطبيقات الافتراضية في ويندوز (Default Apps)
+    cap_key = r"Software\AlDawli\Capabilities"
+    with winreg.CreateKey(winreg.HKEY_CURRENT_USER, cap_key) as k:
+        winreg.SetValueEx(k, "ApplicationName", 0, winreg.REG_SZ, APP_TITLE)
+        winreg.SetValueEx(k, "ApplicationDescription", 0, winreg.REG_SZ, "مدير تنزيلات وتورنت")
+    with winreg.CreateKey(winreg.HKEY_CURRENT_USER, cap_key + r"\URLAssociations") as k:
+        winreg.SetValueEx(k, "magnet", 0, winreg.REG_SZ, "AlDawli.Magnet")
+    with winreg.CreateKey(winreg.HKEY_CURRENT_USER, r"Software\RegisteredApplications") as k:
+        winreg.SetValueEx(k, "AlDawliDownloads", 0, winreg.REG_SZ, cap_key)
+
+    # فحص ما إذا كان uTorrent أو برنامج آخر مقفل UserChoice في ويندوز
+    locked_by_other = False
+    try:
+        with winreg.OpenKey(winreg.HKEY_CURRENT_USER, r"Software\Microsoft\Windows\Shell\Associations\UrlAssociations\magnet\UserChoice") as uk:
+            prog, _ = winreg.QueryValueEx(uk, "ProgId")
+            if prog and "aldawli" not in str(prog).lower():
+                locked_by_other = True
+    except Exception:
+        pass
+
+    if locked_by_other:
+        try:
+            subprocess.Popen(["cmd", "/c", "start", "", "ms-settings:defaultapps"], creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
+        except Exception:
+            pass
+    return {"ok": True, "locked_by_other": locked_by_other}
+
+
+def set_windows_autostart(enable=True):
+    """تفعيل أو تعطيل التشغيل التلقائي مع بدء الويندوز (في الخلفية بصينية النظام مثل IDM)."""
+    if platform.system() != "Windows":
+        return False
+    import winreg
+    run_key = r"Software\Microsoft\Windows\CurrentVersion\Run"
+    with winreg.CreateKey(winreg.HKEY_CURRENT_USER, run_key) as k:
+        if enable:
+            if getattr(sys, "frozen", False):
+                cmd_str = f'"{Path(sys.executable).resolve()}" --no-window'
+            else:
+                py_exe = Path(sys.executable).resolve()
+                pyw_exe = py_exe.with_name("pythonw.exe")
+                runner = pyw_exe if pyw_exe.exists() else py_exe
+                cmd_str = f'"{runner}" "{Path(__file__).resolve()}" --no-window'
+            winreg.SetValueEx(k, "AlDawliDownloads", 0, winreg.REG_SZ, cmd_str)
+        else:
+            try:
+                winreg.DeleteValue(k, "AlDawliDownloads")
+            except FileNotFoundError:
+                pass
     return True
+
+
+def is_windows_autostart_enabled():
+    if platform.system() != "Windows":
+        return False
+    try:
+        import winreg
+        with winreg.OpenKey(winreg.HKEY_CURRENT_USER, r"Software\Microsoft\Windows\CurrentVersion\Run") as k:
+            winreg.QueryValueEx(k, "AlDawliDownloads")
+            return True
+    except Exception:
+        return False
+
+
+def show_or_open_main_window():
+    """إظهار نافذة الدولي للتحميلات في المقدمة إن كانت مفتوحة، أو فتحها تلقائيًا إن كانت مغلقة."""
+    if platform.system() == "Windows":
+        try:
+            user32 = ctypes.windll.user32
+            SW_RESTORE = 9
+            found = []
+            WNDENUMPROC = ctypes.WINFUNCTYPE(ctypes.c_bool, ctypes.c_void_p, ctypes.c_void_p)
+            def cb(hwnd, _lp):
+                if user32.IsWindowVisible(hwnd):
+                    n = user32.GetWindowTextLengthW(hwnd)
+                    if n > 0:
+                        buf = ctypes.create_unicode_buffer(n + 1)
+                        user32.GetWindowTextW(hwnd, buf, n + 1)
+                        if APP_TITLE in buf.value and "معلومات ملف التحميل" not in buf.value:
+                            if user32.IsIconic(hwnd):
+                                user32.ShowWindow(hwnd, SW_RESTORE)
+                            user32.SetForegroundWindow(hwnd)
+                            found.append(hwnd)
+                            return False
+                return True
+            user32.EnumWindows(WNDENUMPROC(cb), 0)
+            if found:
+                return True
+        except Exception:
+            pass
+    open_window(f"http://127.0.0.1:{CURRENT_PORT}/")
+    return True
+
+
+def start_windows_tray():
+    """إضافة أيقونة الدولي للتحميلات في صينية النظام (System Tray) بويندوز مثل IDM بدون أي مكتبات خارجية."""
+    if platform.system() != "Windows":
+        return
+
+    def _tray_thread():
+        try:
+            import ctypes.wintypes as wt
+            user32 = ctypes.windll.user32
+            shell32 = ctypes.windll.shell32
+            kernel32 = ctypes.windll.kernel32
+
+            WM_DESTROY = 0x0002
+            WM_COMMAND = 0x0111
+            WM_USER = 0x0400
+            WM_TRAY = WM_USER + 20
+            WM_LBUTTONUP = 0x0202
+            WM_LBUTTONDBLCLK = 0x0203
+            WM_RBUTTONUP = 0x0205
+            NIM_ADD = 0x00000000
+            NIM_DELETE = 0x00000002
+            NIF_MESSAGE = 0x00000001
+            NIF_ICON = 0x00000002
+            NIF_TIP = 0x00000004
+            MF_STRING = 0x00000000
+            TPM_LEFTALIGN = 0x0000
+            TPM_BOTTOMALIGN = 0x0020
+            IMAGE_ICON = 1
+            LR_LOADFROMFILE = 0x0010
+
+            ID_OPEN = 1001
+            ID_QUIT = 1002
+
+            LRESULT = ctypes.c_ssize_t
+            WNDPROC = ctypes.WINFUNCTYPE(LRESULT, wt.HWND, wt.UINT, wt.WPARAM, wt.LPARAM)
+
+            class WNDCLASSW(ctypes.Structure):
+                _fields_ = [
+                    ("style", wt.UINT), ("lpfnWndProc", WNDPROC),
+                    ("cbClsExtra", ctypes.c_int), ("cbWndExtra", ctypes.c_int),
+                    ("hInstance", wt.HINSTANCE), ("hIcon", wt.HICON),
+                    ("hCursor", wt.HCURSOR), ("hbrBackground", wt.HBRUSH),
+                    ("lpszMenuName", wt.LPCWSTR), ("lpszClassName", wt.LPCWSTR),
+                ]
+
+            class NOTIFYICONDATAW(ctypes.Structure):
+                _fields_ = [
+                    ("cbSize", wt.DWORD), ("hWnd", wt.HWND), ("uID", wt.UINT),
+                    ("uFlags", wt.UINT), ("uCallbackMessage", wt.UINT), ("hIcon", wt.HICON),
+                    ("szTip", wt.WCHAR * 128),
+                ]
+
+            user32.DefWindowProcW.argtypes = [wt.HWND, wt.UINT, wt.WPARAM, wt.LPARAM]
+            user32.DefWindowProcW.restype = LRESULT
+            user32.LoadImageW.argtypes = [wt.HINSTANCE, wt.LPCWSTR, wt.UINT, ctypes.c_int, ctypes.c_int, wt.UINT]
+            user32.LoadImageW.restype = wt.HICON
+
+            def wnd_proc(hwnd, msg, wparam, lparam):
+                if msg == WM_TRAY:
+                    if lparam in (WM_LBUTTONUP, WM_LBUTTONDBLCLK):
+                        threading.Thread(target=show_or_open_main_window, daemon=True).start()
+                    elif lparam == WM_RBUTTONUP:
+                        menu = user32.CreatePopupMenu()
+                        user32.AppendMenuW(menu, MF_STRING, ID_OPEN, "فتح الدولي للتحميلات")
+                        user32.AppendMenuW(menu, MF_STRING, ID_QUIT, "إنهاء التطبيق")
+                        pt = wt.POINT()
+                        user32.GetCursorPos(ctypes.byref(pt))
+                        user32.SetForegroundWindow(hwnd)
+                        user32.TrackPopupMenu(menu, TPM_LEFTALIGN | TPM_BOTTOMALIGN, pt.x, pt.y, 0, hwnd, None)
+                        user32.DestroyMenu(menu)
+                    return 0
+                elif msg == WM_COMMAND:
+                    cmd_id = wparam & 0xFFFF
+                    if cmd_id == ID_OPEN:
+                        threading.Thread(target=show_or_open_main_window, daemon=True).start()
+                    elif cmd_id == ID_QUIT:
+                        def bye():
+                            time.sleep(0.15)
+                            if MGR:
+                                MGR.shutdown()
+                            os._exit(0)
+                        threading.Thread(target=bye, daemon=True).start()
+                    return 0
+                elif msg == WM_DESTROY:
+                    user32.PostQuitMessage(0)
+                    return 0
+                return user32.DefWindowProcW(hwnd, msg, wparam, lparam)
+
+            hinst = kernel32.GetModuleHandleW(None)
+            cls_name = f"AlDawliTray_{os.getpid()}"
+            wc = WNDCLASSW()
+            wc.lpfnWndProc = WNDPROC(wnd_proc)
+            wc.hInstance = hinst
+            wc.lpszClassName = cls_name
+            user32.RegisterClassW(ctypes.byref(wc))
+
+            hwnd = user32.CreateWindowExW(0, cls_name, APP_TITLE, 0, 0, 0, 0, 0, None, None, hinst, None)
+            if not hwnd:
+                return
+
+            ico_path = str(ensure_icon_file())
+            hicon = user32.LoadImageW(None, ico_path, IMAGE_ICON, 32, 32, LR_LOADFROMFILE)
+
+            nid = NOTIFYICONDATAW()
+            nid.cbSize = ctypes.sizeof(NOTIFYICONDATAW)
+            nid.hWnd = hwnd
+            nid.uID = 1
+            nid.uFlags = NIF_MESSAGE | NIF_ICON | NIF_TIP
+            nid.uCallbackMessage = WM_TRAY
+            nid.hIcon = hicon
+            nid.szTip = f"{APP_TITLE} (v{APP_VERSION})"
+            shell32.Shell_NotifyIconW(NIM_ADD, ctypes.byref(nid))
+
+            msg_s = wt.MSG()
+            while user32.GetMessageW(ctypes.byref(msg_s), None, 0, 0) > 0:
+                user32.TranslateMessage(ctypes.byref(msg_s))
+                user32.DispatchMessageW(ctypes.byref(msg_s))
+            shell32.Shell_NotifyIconW(NIM_DELETE, ctypes.byref(nid))
+        except Exception:
+            pass
+
+    threading.Thread(target=_tray_thread, daemon=True).start()
 
 
 def _find_chromium_exe():
@@ -2445,7 +2661,7 @@ class Manager:
         self.save()
         return {"ok": True, "id": i}
 
-    def add_media(self, url, title, format_id, audio_only=False, ext="mp4", size=-1, headers=None, yt_clients=None):
+    def add_media(self, url, title, format_id, audio_only=False, ext="mp4", size=-1, headers=None, yt_clients=None, save_dir=None):
         url = (url or "").strip()
         p = up.urlparse(url)
         if p.scheme not in ("http", "https") or not p.netloc:
@@ -2454,10 +2670,12 @@ class Manager:
         fname = safe_name(title or "video")
         if not fname.lower().endswith("." + ext):
             fname = f"{fname}.{ext}"
+        target_dir = str(Path(save_dir or self.settings["dir"]).expanduser())
+        os.makedirs(target_dir, exist_ok=True)
         i = secrets.token_hex(4)
         with self.lock:
             self.items[i] = Item(self, dict(
-                id=i, url=url, dir=self.settings["dir"], filename=fname,
+                id=i, url=url, dir=target_dir, filename=fname,
                 size=int(size) if size else -1, kind="media",
                 format_id=format_id or "", audio_only=bool(audio_only),
                 yt_clients=yt_clients,
@@ -2627,6 +2845,9 @@ class Manager:
             s["catbox_userhash"] = str(d.get("catbox_userhash") or "").strip()[:80]
         if "confirm_dialog" in d:
             s["confirm_dialog"] = bool(d.get("confirm_dialog"))
+        if "autostart" in d:
+            s["autostart"] = bool(d.get("autostart"))
+            set_windows_autostart(s["autostart"])
         self.save()
         self.aria2.apply_settings()
 
@@ -2938,7 +3159,7 @@ class Handler(BaseHTTPRequestHandler):
                 uri = (d.get("uri") or "").strip()
                 if d.get("inspect", True):
                     MGR.pending_magnet = uri
-                    threading.Thread(target=bring_window_to_front, daemon=True).start()
+                    threading.Thread(target=show_or_open_main_window, daemon=True).start()
                     r = {"ok": True, "inspect": True}
                 else:
                     r = MGR.aria2.add_magnet(uri)
@@ -2974,19 +3195,20 @@ class Handler(BaseHTTPRequestHandler):
                     r = MGR.add(urls, d.get("headers"))
             elif p == "/api/ext/video":
                 MGR.pending_video = {"url": d.get("url", ""), "headers": d.get("headers") or {}}
+                threading.Thread(target=show_or_open_main_window, daemon=True).start()
                 r = {"ok": True}
             elif p == "/api/media/probe": r = probe_media(d.get("url", ""), d.get("headers"))
             elif p == "/api/media/add":
                 r = MGR.add_media(d.get("url"), d.get("title"), d.get("format_id"),
                                   d.get("audio_only", False), d.get("ext", "mp4"),
-                                  d.get("size", -1), d.get("headers"), d.get("yt_clients"))
+                                  d.get("size", -1), d.get("headers"), d.get("yt_clients"),
+                                  d.get("dir"))
             elif p == "/api/media/install": r = MGR.install_ytdlp()
             elif p == "/api/create_shortcut":
                 lnk = create_desktop_shortcut()
                 r = {"ok": True, "path": lnk}
             elif p == "/api/register_magnet":
-                register_magnet_protocol()
-                r = {"ok": True}
+                r = register_magnet_protocol()
             elif p == "/api/refresh_url": MGR.refresh_url(d["id"], d.get("url", ""), d.get("headers"))
             elif p == "/api/pause": MGR.pause(d["id"])
             elif p == "/api/resume": MGR.resume(d["id"])
@@ -3078,6 +3300,7 @@ def main():
     CURRENT_PORT = port
     url = f"http://127.0.0.1:{port}/"
     print(f"{APP_TITLE} يعمل على {url}  (اضغط Ctrl+C للإنهاء)")
+    start_windows_tray()
     if not a.no_window: open_window(url)
     try: srv.serve_forever()
     except KeyboardInterrupt: MGR.shutdown()
@@ -3226,7 +3449,7 @@ textarea{min-height:120px;resize:vertical;direction:ltr;text-align:left}input.l{
 </style></head><body>
 <div class="app">
 <aside>
- <div class="brand"><img class="logo-img" src="/icon.png?v=3" alt="الدولي للتحميلات"><div><b>الدولي للتحميلات</b><small>الإصدار <span id="appVer">10.3</span></small></div></div>
+ <div class="brand"><img class="logo-img" src="/icon.png?v=3" alt="الدولي للتحميلات"><div><b>الدولي للتحميلات</b><small>الإصدار <span id="appVer">10.4</span></small></div></div>
  <button class="nav on" data-f="all"><span data-ic="all"></span>كل التنزيلات<em id="c-all">0</em></button>
  <button class="nav" data-f="active"><span data-ic="down"></span>قيد التنزيل<em id="c-active">0</em></button>
  <button class="nav" data-f="done"><span data-ic="ok"></span>المكتملة<em id="c-done">0</em></button>
@@ -3262,6 +3485,13 @@ textarea{min-height:120px;resize:vertical;direction:ltr;text-align:left}input.l{
     <input class="l" id="vUrl" placeholder="https://www.youtube.com/watch?v=... أو رابط ريلز إنستغرام">
     <button class="btn" id="vPaste"><span data-ic="clip"></span>لصق</button>
     <button class="btn pri" id="vProbe"><span data-ic="search"></span>فحص الرابط</button>
+   </div>
+   <div style="margin-top:10px">
+    <label for="vDir" style="margin:0 0 4px">مجلد حفظ الفيديو</label>
+    <div class="inrow">
+     <input class="l" id="vDir" placeholder="نفس مجلد الحفظ الافتراضي">
+     <button class="btn" id="vBrowse" type="button" title="اختيار مجلد">...</button>
+    </div>
    </div>
    <div class="badges">
     <span class="badge">YouTube</span><span class="badge">Instagram Reels</span><span class="badge">TikTok</span><span class="badge">Facebook</span><span class="badge">X / Twitter</span><span class="badge">MP3 صوت</span>
@@ -3378,6 +3608,7 @@ textarea{min-height:120px;resize:vertical;direction:ltr;text-align:left}input.l{
  <label for="sSpd">حد السرعة الإجمالية (ك.ب/ث — 0 بدون حد)</label><input class="l" id="sSpd" type="number" min="0" step="50" placeholder="0">
  <label for="sHash">رمز حساب Catbox (Userhash — اختياري لحذف مرفوعاتك من السيرفر لاحقًا)</label><input class="l" id="sHash" placeholder="اتركه فارغًا للرفع المجهول المباشر">
  <label class="ucheck" style="margin-top:12px"><input type="checkbox" id="sConf"><span>إظهار نافذة «معلومات ملف التحميل» قبل بدء التنزيل (مثل IDM)</span></label>
+ <label class="ucheck" style="margin-top:8px"><input type="checkbox" id="sAuto"><span>تشغيل الدولي تلقائيًا مع بدء الويندوز (في صينية النظام مثل IDM)</span></label>
  <div class="row">
   <button class="btn pri" id="okSet">حفظ</button>
   <button class="btn" id="bDeskSc">إنشاء اختصار على سطح المكتب</button>
@@ -3514,6 +3745,7 @@ function setTab(name){
  $('#soonView').style.display=isS?'flex':'none';
  $('#list').style.display=(isV||isU||isT||isS)?'none':'flex';
  if(isV||isU||isT||isS)$('#empty').style.display='none';
+ if(isV && !$('#vDir').value && S.settings && S.settings.dir)$('#vDir').value=S.settings.dir;
  if(isT && S.torrent_engine && S.torrent_engine.ready && !S.torrent_engine.running){api('/api/torrent/start_engine',{}).then(()=>tick(true)).catch(()=>{})}
  render();
 }
@@ -3953,7 +4185,7 @@ async function doProbe(url, headers){
    const f=info.formats[+b.dataset.fi];
    b.disabled=true;
    try{
-    await api('/api/media/add',{url:info.url,title:info.title,format_id:f.format_id,audio_only:f.audio_only,ext:f.ext,size:f.size,headers:lastVidHeaders,yt_clients:f.yt_clients||null});
+    await api('/api/media/add',{url:info.url,title:info.title,format_id:f.format_id,audio_only:f.audio_only,ext:f.ext,size:f.size,headers:lastVidHeaders,yt_clients:f.yt_clients||null,dir:$('#vDir').value.trim()});
     toast('بدأ تحميل: '+info.title);
     setTab('active');
     tick(true);
@@ -4119,6 +4351,7 @@ $('#uList').onclick=e=>{
 };
 $('#vProbe').onclick=()=>doProbe();
 $('#vUrl').addEventListener('keydown',e=>{if(e.key==='Enter')doProbe()});
+$('#vBrowse').onclick=async()=>{try{const r=await api('/api/browse_dir',{initial:$('#vDir').value||S.settings.dir||''});if(r.dir)$('#vDir').value=r.dir}catch(e){toast(e.message)}};
 $('#vPaste').onclick=async()=>{try{const t=(await navigator.clipboard.readText()).trim();$('#vUrl').value=t;if(t)doProbe(t)}catch(e){toast('تعذّر قراءة الحافظة، الصق الرابط يدويًا')}};
 document.querySelectorAll('[data-close]').forEach(b=>b.onclick=()=>b.closest('dialog').close());
 let delId=null,urlId=null;
@@ -4151,8 +4384,8 @@ document.addEventListener('paste',e=>{if($('dialog[open]')||/INPUT|TEXTAREA/.tes
  const t=(e.clipboardData.getData('text')||'').trim();if(/^(https?:\/\/|magnet:\?)/i.test(t))openAdd(t)});
 $('#bPauAll').onclick=()=>act('/api/pause_all');$('#bResAll').onclick=()=>act('/api/resume_all');$('#bClear').onclick=()=>act('/api/clear_done');
 const opt=(s,a,v)=>{s.innerHTML=a.map(x=>`<option${x==v?' selected':''}>${x}</option>`).join('')};
-$('#bSet').onclick=()=>{const s=S.settings;$('#sDir').value=s.dir||'';opt($('#sSeg'),[1,2,4,8,12,16],s.segments);opt($('#sAct'),[1,2,3,4,5,6,8],s.max_active);$('#sSpd').value=s.max_speed||0;$('#sHash').value=s.catbox_userhash||'';$('#sConf').checked=s.confirm_dialog!==false;$('#dSet').showModal()};
-$('#okSet').onclick=async()=>{try{await api('/api/settings',{dir:$('#sDir').value,segments:+$('#sSeg').value,max_active:+$('#sAct').value,max_speed:Math.max(0,parseInt($('#sSpd').value,10)||0),catbox_userhash:$('#sHash').value.trim(),confirm_dialog:$('#sConf').checked});$('#dSet').close();toast('تم حفظ الإعدادات');tick(true)}catch(e){toast(e.message)}};
+$('#bSet').onclick=()=>{const s=S.settings;$('#sDir').value=s.dir||'';opt($('#sSeg'),[1,2,4,8,12,16],s.segments);opt($('#sAct'),[1,2,3,4,5,6,8],s.max_active);$('#sSpd').value=s.max_speed||0;$('#sHash').value=s.catbox_userhash||'';$('#sConf').checked=s.confirm_dialog!==false;$('#sAuto').checked=!!s.autostart;$('#dSet').showModal()};
+$('#okSet').onclick=async()=>{try{await api('/api/settings',{dir:$('#sDir').value,segments:+$('#sSeg').value,max_active:+$('#sAct').value,max_speed:Math.max(0,parseInt($('#sSpd').value,10)||0),catbox_userhash:$('#sHash').value.trim(),confirm_dialog:$('#sConf').checked,autostart:$('#sAuto').checked});$('#dSet').close();toast('تم حفظ الإعدادات');tick(true)}catch(e){toast(e.message)}};
 $('#bChkUpd').onclick=async()=>{try{lastUpdMsg='';await api('/api/update/check',{});toast('جارٍ التحقق من التحديثات...');tick(true)}catch(e){toast(e.message)}};
 $('#bDoUpd').onclick=async()=>{
  try{
@@ -4161,7 +4394,7 @@ $('#bDoUpd').onclick=async()=>{
   setTimeout(()=>location.reload(), 4000);
  }catch(e){toast(e.message)}
 };
-$('#bRegMag').onclick=async()=>{try{await api('/api/register_magnet',{});toast('تم تعيين الدولي للتحميلات كبرنامج افتراضي لروابط Magnet!')}catch(e){toast(e.message)}};
+$('#bRegMag').onclick=async()=>{try{const r=await api('/api/register_magnet',{});toast(r.locked_by_other?'تم التسجيل! اختر «الدولي للتحميلات» لبروتوكول MAGNET من نافذة إعدادات ويندوز التي فُتحت الآن.':'تم تعيين الدولي للتحميلات كبرنامج افتراضي لروابط Magnet بنجاح!')}catch(e){toast(e.message)}};
 $('#bDeskSc').onclick=async()=>{try{await api('/api/create_shortcut',{});toast('تم إنشاء اختصار «الدولي للتحميلات» على سطح المكتب!')}catch(e){toast(e.message)}};
 $('#bQuit').onclick=async()=>{try{await api('/api/quit',{})}catch(e){}$('#bye').style.display='grid'};
 tick();

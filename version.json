@@ -1,5 +1,5 @@
 {
-  "version": "10.3",
-  "notes": "إضافة نافذة التحميل المنبثقة أمام المتصفح مباشرة (مثل IDM) + تعيين الدولي كبرنامج افتراضي لروابط Magnet.",
+  "version": "10.4",
+  "notes": "إضافة أيقونة صينية النظام (System Tray) مثل IDM + فتح التطبيق تلقائيًا عند تحميل فيديو + اختيار مجلد الحفظ في قسم الفيديو + تحسين تسجيل Magnet.",
   "url": "https://raw.githubusercontent.com/momenhijazi0-debug/AlDawli-Downloads/main/aldawli.py"
 }
