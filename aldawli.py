@@ -12,7 +12,7 @@ from http.server import ThreadingHTTPServer, BaseHTTPRequestHandler
 from pathlib import Path
 
 APP_TITLE = "الدولي للتحميلات"
-APP_VERSION = "10.11"
+APP_VERSION = "10.12"
 UPDATE_REPO = "momenhijazi0-debug/AlDawli-Downloads"
 UPDATE_MANIFEST_URL = f"https://raw.githubusercontent.com/{UPDATE_REPO}/main/version.json"
 UPDATE_SCRIPT_URL = f"https://raw.githubusercontent.com/{UPDATE_REPO}/main/aldawli.py"
@@ -638,10 +638,10 @@ def is_tiktok_url(url):
 
 
 def _probe_tiktok_fallback(url):
-    """جلب روابط تحميل تيك توك مباشرة (بدون علامة مائية) عند تعذّر yt-dlp."""
+    """جلب روابط تحميل تيك توك مباشرة (بدون علامة مائية) بسرعة."""
     api_url = "https://www.tikwm.com/api/?" + up.urlencode({"url": url, "hd": "1"})
     req = rq.Request(api_url, headers={"User-Agent": UA, "Accept": "application/json"})
-    with rq.urlopen(req, timeout=20) as r:
+    with rq.urlopen(req, timeout=7) as r:
         res = json.loads(r.read().decode("utf-8", errors="replace"))
     if res.get("code") != 0 or not isinstance(res.get("data"), dict):
         raise RuntimeError(res.get("msg") or "تعذّر جلب فيديو تيك توك من الرابط")
@@ -789,8 +789,8 @@ def build_ytdlp_base_opts(url, headers=None, yt_clients=None, logger=None):
         "quiet": True,
         "no_warnings": False if logger else True,
         "noplaylist": True,
-        "socket_timeout": 25,
-        "retries": 3,
+        "socket_timeout": 12,
+        "retries": 1,
         "nocheckcertificate": True,
     }
     if logger:
@@ -925,7 +925,13 @@ def probe_media(url, headers=None):
     if p.scheme not in ("http", "https") or not p.netloc:
         raise ValueError("الرابط غير صالح (يلزم http أو https)")
 
-    has_ff = bool(find_ffmpeg(force=True))
+    if is_tiktok_url(url):
+        try:
+            return _probe_tiktok_fallback(url)
+        except Exception:
+            pass
+
+    has_ff = bool(find_ffmpeg(force=False))
     client_plans = [None, ["android_vr", "ios", "tv"]] if is_youtube_url(url) else [None]
 
     info = None
@@ -3643,7 +3649,7 @@ textarea{min-height:120px;resize:vertical;direction:ltr;text-align:left}input.l{
 </style></head><body>
 <div class="app">
 <aside>
- <div class="brand"><img class="logo-img" src="/icon.png?v=3" alt="الدولي للتحميلات"><div><b>الدولي للتحميلات</b><small>الإصدار <span id="appVer">10.11</span></small></div></div>
+ <div class="brand"><img class="logo-img" src="/icon.png?v=3" alt="الدولي للتحميلات"><div><b>الدولي للتحميلات</b><small>الإصدار <span id="appVer">10.12</span></small></div></div>
  <button class="nav" data-f="video"><span data-ic="video"></span>تحميل فيديو</button>
  <button class="nav" data-f="upload"><span data-ic="upload"></span>مركز الرفع<em id="c-upload">0</em></button>
  <button class="nav" data-f="torrent"><span data-ic="magnet"></span>التورنت<em id="c-torrent">0</em></button>

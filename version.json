@@ -1,5 +1,5 @@
 {
-  "version": "10.11",
-  "notes": "إصلاح تحميل فيديوهات تيك توك (TikTok) بدعم التحميل المباشر HD بدون علامة مائية وتجاوز خطأ الشهادات والشبكة.",
+  "version": "10.12",
+  "notes": "تسريع فحص روابط تيك توك والمنصات لتظهر الجودات خلال ثوانٍ معدودة بدل الانتظار الطويل.",
   "url": "https://raw.githubusercontent.com/momenhijazi0-debug/AlDawli-Downloads/main/aldawli.py"
 }
