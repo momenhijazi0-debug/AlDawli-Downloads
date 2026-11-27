@@ -12,7 +12,7 @@ from http.server import ThreadingHTTPServer, BaseHTTPRequestHandler
 from pathlib import Path
 
 APP_TITLE = "الدولي للتحميلات"
-APP_VERSION = "10.23"
+APP_VERSION = "10.25"
 UPDATE_REPO = "momenhijazi0-debug/AlDawli-Downloads"
 UPDATE_MANIFEST_URL = f"https://raw.githubusercontent.com/{UPDATE_REPO}/main/version.json"
 UPDATE_SCRIPT_URL = f"https://raw.githubusercontent.com/{UPDATE_REPO}/main/aldawli.py"
@@ -690,13 +690,34 @@ def _run_webview_main(wv, url, hidden=False):
             win.events.closing += _on_closing
             threading.Thread(target=apply_windows_taskbar_icon, daemon=True).start()
 
+        wv_data_dir = APP / f"webview_profile_{os.getpid()}"
+        try:
+            wv_data_dir.mkdir(parents=True, exist_ok=True)
+        except Exception:
+            pass
+        if is_win:
+            # عزل بيانات WebView2 عن ملفات Microsoft Edge وتفادي إغلاق العملية عند إنهاء Edge
+            cur_args = os.environ.get("WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS", "")
+            iso_args = f'--user-data-dir="{wv_data_dir}" --disable-features=msEdgeShareWithEdge'
+            if str(wv_data_dir) not in cur_args:
+                os.environ["WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS"] = (cur_args + " " + iso_args).strip()
+
+        def _cleanup_wv_dir():
+            time.sleep(1.5)
+            try:
+                import shutil
+                shutil.rmtree(wv_data_dir, ignore_errors=True)
+            except Exception:
+                pass
+
         start_kw = {}
         if is_win:
             start_kw["gui"] = "edgechromium"      # يمنع الرجوع لمحرّك IE القديم
         try:
-            wv.start(private_mode=False, storage_path=str(APP / "webview_data"), **start_kw)
+            wv.start(private_mode=False, storage_path=str(wv_data_dir), **start_kw)
         except TypeError:
             wv.start(**start_kw)
+        threading.Thread(target=_cleanup_wv_dir, daemon=True).start()
     except Exception as e:
         print("pywebview failed, falling back to browser app-mode:", e)
         _WV["mod"], _WV["main"] = None, None
@@ -3526,6 +3547,7 @@ class Manager:
             "pending_download": pd,
             "pending_magnet": pm,
             "update": self.update_info,
+            "online_users": get_online_users_info(),
         }
 
     def shutdown(self):
@@ -4108,6 +4130,106 @@ def get_speedtest_status():
         return dict(_SPEEDTEST_STATE)
 
 
+
+# ====================== عداد المستخدمين المتصلين حالياً ======================
+ONLINE_USERS_ENDPOINT = ""   # اختياري: ضع رابط Supabase REST أو Firebase RTDB هنا لتفعيل العداد السحابي المشترك
+ONLINE_USERS_API_KEY = ""    # اختياري: مفتاح anon key لـ Supabase أو يترك فارغًا لـ Firebase/مخصص
+ONLINE_USERS_TABLE = "aldawli_online"
+
+_PRESENCE_LOCK = threading.Lock()
+_PRESENCE_STATE = {
+    "session_id": secrets.token_hex(8),
+    "online_count": 1,
+    "mode": "local",        # local | cloud
+    "last_ok": 0.0,
+}
+
+
+def _fetch_online_users_count():
+    sid = _PRESENCE_STATE["session_id"]
+    now_ts = int(time.time())
+    ep = (ONLINE_USERS_ENDPOINT or "").strip().rstrip("/")
+    if not ep:
+        with _PRESENCE_LOCK:
+            _PRESENCE_STATE["online_count"] = 1
+            _PRESENCE_STATE["mode"] = "local"
+            _PRESENCE_STATE["last_ok"] = time.monotonic()
+        return _PRESENCE_STATE["online_count"]
+
+    try:
+        ctx = ssl.create_default_context()
+        if "firebaseio.com" in ep or "firebasedatabase.app" in ep:
+            # Firebase Realtime Database REST
+            put_url = f"{ep}/presence/{sid}.json"
+            body = json.dumps({"ts": now_ts, "v": APP_VERSION}).encode("utf-8")
+            req = rq.Request(put_url, data=body, method="PUT", headers={"Content-Type": "application/json", "User-Agent": UA})
+            with rq.urlopen(req, timeout=6, context=ctx) as r:
+                r.read()
+            get_url = f"{ep}/presence.json"
+            with rq.urlopen(rq.Request(get_url, headers={"User-Agent": UA}), timeout=6, context=ctx) as r:
+                data = json.loads(r.read().decode("utf-8", errors="replace") or "{}")
+            active = 0
+            if isinstance(data, dict):
+                for k, v in data.items():
+                    if isinstance(v, dict) and (now_ts - int(v.get("ts", 0) or 0)) <= 95:
+                        active += 1
+            count = max(1, active)
+        else:
+            # Supabase PostgREST endpoint (e.g. https://xxxx.supabase.co/rest/v1)
+            tbl_url = ep if ep.endswith(f"/{ONLINE_USERS_TABLE}") else f"{ep}/{ONLINE_USERS_TABLE}"
+            headers = {
+                "Content-Type": "application/json",
+                "User-Agent": UA,
+                "Prefer": "resolution=merge-duplicates",
+            }
+            if ONLINE_USERS_API_KEY:
+                headers["apikey"] = ONLINE_USERS_API_KEY
+                headers["Authorization"] = f"Bearer {ONLINE_USERS_API_KEY}"
+            row = json.dumps({"session_id": sid, "last_seen": now_ts, "version": APP_VERSION}).encode("utf-8")
+            req = rq.Request(tbl_url, data=row, method="POST", headers=headers)
+            with rq.urlopen(req, timeout=6, context=ctx) as r:
+                r.read()
+            cutoff = now_ts - 95
+            q_url = f"{tbl_url}?last_seen=gte.{cutoff}&select=session_id"
+            q_headers = {"User-Agent": UA}
+            if ONLINE_USERS_API_KEY:
+                q_headers["apikey"] = ONLINE_USERS_API_KEY
+                q_headers["Authorization"] = f"Bearer {ONLINE_USERS_API_KEY}"
+            with rq.urlopen(rq.Request(q_url, headers=q_headers), timeout=6, context=ctx) as r:
+                rows = json.loads(r.read().decode("utf-8", errors="replace") or "[]")
+            count = max(1, len(rows) if isinstance(rows, list) else 1)
+
+        with _PRESENCE_LOCK:
+            _PRESENCE_STATE["online_count"] = count
+            _PRESENCE_STATE["mode"] = "cloud"
+            _PRESENCE_STATE["last_ok"] = time.monotonic()
+    except Exception:
+        with _PRESENCE_LOCK:
+            if _PRESENCE_STATE["online_count"] < 1:
+                _PRESENCE_STATE["online_count"] = 1
+    return _PRESENCE_STATE["online_count"]
+
+
+def _start_presence_heartbeat():
+    def _loop():
+        _fetch_online_users_count()
+        while True:
+            time.sleep(35)
+            try:
+                _fetch_online_users_count()
+            except Exception:
+                pass
+    threading.Thread(target=_loop, daemon=True).start()
+
+
+def get_online_users_info():
+    with _PRESENCE_LOCK:
+        return {
+            "count": _PRESENCE_STATE["online_count"],
+            "mode": _PRESENCE_STATE["mode"],
+        }
+
+
 def main():
     global MGR
     ap = argparse.ArgumentParser()
@@ -4163,9 +4285,13 @@ def main():
                 for p in tmp_root.glob("_MEI*"):
                     if p.is_dir() and p.name != my_mei:
                         shutil.rmtree(p, ignore_errors=True)
+                for wp in APP.glob("webview_profile_*"):
+                    if wp.is_dir() and not wp.name.endswith(f"_{os.getpid()}"):
+                        shutil.rmtree(wp, ignore_errors=True)
             except Exception:
                 pass
         threading.Thread(target=_clean_old_mei, daemon=True).start()
+    _start_presence_heartbeat()
     start_windows_tray()
     wv = None if a.browser else _import_webview()
     threading.Thread(target=srv.serve_forever, daemon=True).start()
@@ -4332,7 +4458,7 @@ textarea{min-height:120px;resize:vertical;direction:ltr;text-align:left}input.l{
 </style></head><body>
 <div class="app">
 <aside>
- <div class="brand"><img class="logo-img" src="/icon.png?v=3" alt="الدولي للتحميلات"><div><b>الدولي للتحميلات</b><small>الإصدار <span id="appVer">10.23</span></small></div></div>
+ <div class="brand"><img class="logo-img" src="/icon.png?v=3" alt="الدولي للتحميلات"><div><b>الدولي للتحميلات</b><small>الإصدار <span id="appVer">10.25</span></small></div></div>
  <button class="nav" data-f="video"><span data-ic="video"></span>تحميل فيديو</button>
  <button class="nav" data-f="upload"><span data-ic="upload"></span>مركز الرفع<em id="c-upload">0</em></button>
  <button class="nav" data-f="torrent"><span data-ic="magnet"></span>التورنت<em id="c-torrent">0</em></button>
@@ -4343,7 +4469,8 @@ textarea{min-height:120px;resize:vertical;direction:ltr;text-align:left}input.l{
  <button class="nav" data-f="active"><span data-ic="down"></span>قيد التنزيل<em id="c-active">0</em></button>
  <button class="nav" data-f="stopped"><span data-ic="pause"></span>المتوقفة والفاشلة<em id="c-stopped">0</em></button>
  <div class="sp"></div>
- <div class="speed"><small>السرعة الإجمالية</small><b id="spd">0 بايت/ث</b><span class="cap" id="spdCap"></span></div>
+ <div class="speed" style="display:flex;align-items:center;justify-content:space-between;padding:9px 12px"><small style="margin:0">المتصلون الآن</small><b id="onlineCnt" style="font-size:15px;color:var(--ok)">1</b></div>
+<div class="speed"><small>السرعة الإجمالية</small><b id="spd">0 بايت/ث</b><span class="cap" id="spdCap"></span></div>
  <button class="nav" id="bSet"><span data-ic="set"></span>الإعدادات</button>
  <button class="nav" id="bQuit"><span data-ic="power"></span>إنهاء التطبيق</button>
 </aside>
@@ -5043,6 +5170,8 @@ function renderUpdate(){
 function render(){
  for(const k in F)$('#c-'+k).textContent=S.items.filter(F[k]).length;
  const spdTxt=S.upload_speed>0&&S.speed<=0?('↑ '+B(S.upload_speed)+'/ث'):(B(S.speed)+'/ث');
+ const ou=S.online_users||{};
+ $('#onlineCnt').textContent=(ou.count||1)+(ou.mode==='local'?' (أنت)':'');
  $('#spd').textContent=spdTxt;
  $('#spdCap').textContent=S.settings.max_speed>0?'الحد: '+B(S.settings.max_speed*1024)+'/ث':'';
  $('#ttl').textContent=TT[flt];
