@@ -12,7 +12,7 @@ from http.server import ThreadingHTTPServer, BaseHTTPRequestHandler
 from pathlib import Path
 
 APP_TITLE = "الدولي للتحميلات"
-APP_VERSION = "10.10"
+APP_VERSION = "10.11"
 UPDATE_REPO = "momenhijazi0-debug/AlDawli-Downloads"
 UPDATE_MANIFEST_URL = f"https://raw.githubusercontent.com/{UPDATE_REPO}/main/version.json"
 UPDATE_SCRIPT_URL = f"https://raw.githubusercontent.com/{UPDATE_REPO}/main/aldawli.py"
@@ -629,6 +629,79 @@ def is_youtube_url(url):
         return False
 
 
+def is_tiktok_url(url):
+    try:
+        host = (up.urlparse(url).hostname or "").lower()
+        return any(host == d or host.endswith("." + d) for d in ("tiktok.com", "vm.tiktok.com", "vt.tiktok.com"))
+    except Exception:
+        return False
+
+
+def _probe_tiktok_fallback(url):
+    """جلب روابط تحميل تيك توك مباشرة (بدون علامة مائية) عند تعذّر yt-dlp."""
+    api_url = "https://www.tikwm.com/api/?" + up.urlencode({"url": url, "hd": "1"})
+    req = rq.Request(api_url, headers={"User-Agent": UA, "Accept": "application/json"})
+    with rq.urlopen(req, timeout=20) as r:
+        res = json.loads(r.read().decode("utf-8", errors="replace"))
+    if res.get("code") != 0 or not isinstance(res.get("data"), dict):
+        raise RuntimeError(res.get("msg") or "تعذّر جلب فيديو تيك توك من الرابط")
+    d = res["data"]
+    choices = []
+    if d.get("hdplay"):
+        choices.append({
+            "label": "HD بدون علامة مائية",
+            "ext": "MP4",
+            "size": int(d.get("hd_size") or -1),
+            "format_id": "direct:" + str(d["hdplay"]),
+            "audio_only": False,
+            "quality_hint": 1080,
+            "yt_clients": None,
+        })
+    if d.get("play"):
+        choices.append({
+            "label": "جودة عادية بدون علامة مائية",
+            "ext": "MP4",
+            "size": int(d.get("size") or -1),
+            "format_id": "direct:" + str(d["play"]),
+            "audio_only": False,
+            "quality_hint": 720,
+            "yt_clients": None,
+        })
+    if d.get("wmplay"):
+        choices.append({
+            "label": "مع علامة مائية",
+            "ext": "MP4",
+            "size": int(d.get("wm_size") or -1),
+            "format_id": "direct:" + str(d["wmplay"]),
+            "audio_only": False,
+            "quality_hint": 480,
+            "yt_clients": None,
+        })
+    if d.get("music"):
+        choices.append({
+            "label": "صوت فقط (MP3)",
+            "ext": "MP3",
+            "size": -1,
+            "format_id": "direct:" + str(d["music"]),
+            "audio_only": True,
+            "quality_hint": 0,
+            "yt_clients": None,
+        })
+    if not choices:
+        raise RuntimeError("لم يتم العثور على ملفات فيديو قابلة للتحميل في هذا الرابط")
+    author = d.get("author") or {}
+    return {
+        "url": url,
+        "title": (d.get("title") or "TikTok Video").strip()[:140] or "TikTok Video",
+        "uploader": author.get("nickname") or author.get("unique_id") or "",
+        "duration": int(d.get("duration") or 0),
+        "thumbnail": d.get("cover") or d.get("origin_cover") or "",
+        "site": "TikTok",
+        "has_ffmpeg": bool(find_ffmpeg()),
+        "formats": choices,
+    }
+
+
 def get_ytdlp(force=False):
     if not force and _YTDLP_CACHE["checked"]:
         return _YTDLP_CACHE["mod"]
@@ -718,6 +791,7 @@ def build_ytdlp_base_opts(url, headers=None, yt_clients=None, logger=None):
         "noplaylist": True,
         "socket_timeout": 25,
         "retries": 3,
+        "nocheckcertificate": True,
     }
     if logger:
         opts["logger"] = logger
@@ -886,9 +960,13 @@ def probe_media(url, headers=None):
                 break
         except Exception:
             if plan is client_plans[-1] and info is None:
+                if is_tiktok_url(url):
+                    return _probe_tiktok_fallback(url)
                 raise
 
     if not info:
+        if is_tiktok_url(url):
+            return _probe_tiktok_fallback(url)
         raise RuntimeError("تعذّر استخراج بيانات الفيديو من هذا الرابط")
 
     choices = []
@@ -2705,11 +2783,16 @@ class Manager:
         os.makedirs(target_dir, exist_ok=True)
         self.settings["last_dir"] = target_dir
         i = secrets.token_hex(4)
+        is_direct_media = isinstance(format_id, str) and format_id.startswith("direct:")
+        real_url = format_id[7:].strip() if is_direct_media else url
         with self.lock:
             self.items[i] = Item(self, dict(
-                id=i, url=url, dir=target_dir, filename=fname,
-                size=int(size) if size else -1, kind="media",
-                format_id=format_id or "", audio_only=bool(audio_only),
+                id=i, url=real_url, dir=target_dir, filename=fname,
+                custom_name=is_direct_media,
+                size=int(size) if size else -1,
+                kind="direct" if is_direct_media else "media",
+                format_id="" if is_direct_media else (format_id or ""),
+                audio_only=bool(audio_only),
                 yt_clients=yt_clients,
                 headers=headers if isinstance(headers, dict) else {},
             ))
@@ -3560,7 +3643,7 @@ textarea{min-height:120px;resize:vertical;direction:ltr;text-align:left}input.l{
 </style></head><body>
 <div class="app">
 <aside>
- <div class="brand"><img class="logo-img" src="/icon.png?v=3" alt="الدولي للتحميلات"><div><b>الدولي للتحميلات</b><small>الإصدار <span id="appVer">10.10</span></small></div></div>
+ <div class="brand"><img class="logo-img" src="/icon.png?v=3" alt="الدولي للتحميلات"><div><b>الدولي للتحميلات</b><small>الإصدار <span id="appVer">10.11</span></small></div></div>
  <button class="nav" data-f="video"><span data-ic="video"></span>تحميل فيديو</button>
  <button class="nav" data-f="upload"><span data-ic="upload"></span>مركز الرفع<em id="c-upload">0</em></button>
  <button class="nav" data-f="torrent"><span data-ic="magnet"></span>التورنت<em id="c-torrent">0</em></button>
