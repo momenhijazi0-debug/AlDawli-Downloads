@@ -12,7 +12,7 @@ from http.server import ThreadingHTTPServer, BaseHTTPRequestHandler
 from pathlib import Path
 
 APP_TITLE = "الدولي للتحميلات"
-APP_VERSION = "10.17"
+APP_VERSION = "10.18"
 UPDATE_REPO = "momenhijazi0-debug/AlDawli-Downloads"
 UPDATE_MANIFEST_URL = f"https://raw.githubusercontent.com/{UPDATE_REPO}/main/version.json"
 UPDATE_SCRIPT_URL = f"https://raw.githubusercontent.com/{UPDATE_REPO}/main/aldawli.py"
@@ -609,24 +609,66 @@ def start_windows_tray():
 
 
 def _find_chromium_exe():
-    s, c = platform.system(), []
-    if s == "Darwin":
+    """البحث عن متصفح مبني على Chromium يدعم وضع --app: Chrome ثم Edge ثم Brave ثم Vivaldi."""
+    sysname, c = platform.system(), []
+    if sysname == "Darwin":
         c = [f"/Applications/{a}.app/Contents/MacOS/{b}" for a, b in
-             (("Google Chrome", "Google Chrome"), ("Microsoft Edge", "Microsoft Edge"), ("Brave Browser", "Brave Browser"))]
-    elif s == "Windows":
-        for k in ("PROGRAMFILES", "PROGRAMFILES(X86)", "LOCALAPPDATA"):
-            b = os.environ.get(k)
-            if b:
-                c += [
-                    os.path.join(b, r"Google\Chrome\Application\chrome.exe"),
-                    os.path.join(b, r"Microsoft\Edge\Application\msedge.exe"),
-                ]
+             (("Google Chrome", "Google Chrome"), ("Microsoft Edge", "Microsoft Edge"),
+              ("Brave Browser", "Brave Browser"), ("Vivaldi", "Vivaldi"))]
+    elif sysname == "Windows":
+        rel = [
+            r"Google\Chrome\Application\chrome.exe",
+            r"Microsoft\Edge\Application\msedge.exe",
+            r"BraveSoftware\Brave-Browser\Application\brave.exe",
+            r"Vivaldi\Application\vivaldi.exe",
+        ]
+        for r in rel:
+            for k in ("PROGRAMFILES", "PROGRAMFILES(X86)", "LOCALAPPDATA"):
+                b = os.environ.get(k)
+                if b:
+                    c.append(os.path.join(b, r))
+        # مسارات التثبيت المخصّصة: نقرأها من سجل ويندوز (App Paths)
+        try:
+            import winreg
+            for exe in ("chrome.exe", "msedge.exe", "brave.exe", "vivaldi.exe"):
+                for hive in (winreg.HKEY_LOCAL_MACHINE, winreg.HKEY_CURRENT_USER):
+                    try:
+                        with winreg.OpenKey(hive, rf"SOFTWARE\Microsoft\Windows\CurrentVersion\App Paths\{exe}") as k:
+                            c.append(winreg.QueryValueEx(k, "")[0])
+                    except OSError:
+                        pass
+        except Exception:
+            pass
     else:
-        c = [shutil.which(x) for x in ("google-chrome", "chromium", "microsoft-edge", "chromium-browser")]
+        c = [shutil.which(x) for x in ("google-chrome", "google-chrome-stable", "chromium", "chromium-browser",
+                                       "microsoft-edge", "brave-browser", "vivaldi")]
     for x in c:
         if x and os.path.exists(x):
             return x
     return None
+
+
+_NO_BROWSER_NOTIFIED = False
+
+def _notify_no_browser():
+    """رسالة واضحة عندما لا يوجد متصفح Chromium: سيُفتح التطبيق في المتصفح الافتراضي."""
+    global _NO_BROWSER_NOTIFIED
+    if _NO_BROWSER_NOTIFIED:
+        return
+    _NO_BROWSER_NOTIFIED = True
+    msg = ("لم يتم العثور على Google Chrome أو Microsoft Edge أو Brave.\n"
+           "سيُفتح الدولي للتحميلات في متصفحك الافتراضي بدل نافذة مستقلة، وقد تتعطل بعض الميزات "
+           "(نافذة معلومات التنزيل وأيقونة شريط المهام).\n\n"
+           "لأفضل تجربة ثبّت Microsoft Edge أو Google Chrome.")
+    print(msg)
+    if platform.system() == "Windows":
+        def _box():
+            try:
+                # MB_OK | MB_ICONINFORMATION | MB_SETFOREGROUND | MB_RIGHT | MB_RTLREADING
+                ctypes.windll.user32.MessageBoxW(None, msg, APP_TITLE, 0x40 | 0x10000 | 0x80000 | 0x100000)
+            except Exception:
+                pass
+        threading.Thread(target=_box, daemon=True).start()
 
 
 def bring_title_to_front(title_substr, topmost=False):
@@ -838,6 +880,12 @@ def _probe_tiktok_fallback(url):
 def get_ytdlp(force=False):
     if not force and _YTDLP_CACHE["checked"]:
         return _YTDLP_CACHE["mod"]
+    # عند force نُفرغ الوحدات المحمّلة لنحصل على النسخة الجديدة بعد pip، ونستعيد القديمة إن فشل الاستيراد
+    saved = {}
+    if force:
+        for name in list(sys.modules):
+            if name == "yt_dlp" or name.startswith("yt_dlp.") or name.startswith("yt_dlp_ejs"):
+                saved[name] = sys.modules.pop(name)
     try:
         if force:
             importlib.invalidate_caches()
@@ -848,9 +896,28 @@ def get_ytdlp(force=False):
         import yt_dlp
         _YTDLP_CACHE["mod"] = yt_dlp
     except Exception:
-        _YTDLP_CACHE["mod"] = None
+        for name in list(sys.modules):
+            if name == "yt_dlp" or name.startswith("yt_dlp.") or name.startswith("yt_dlp_ejs"):
+                sys.modules.pop(name, None)
+        sys.modules.update(saved)
+        _YTDLP_CACHE["mod"] = saved.get("yt_dlp")
     _YTDLP_CACHE["checked"] = True
     return _YTDLP_CACHE["mod"]
+
+
+def ytdlp_installed_version():
+    try:
+        mod = get_ytdlp()
+        return str(mod.version.__version__) if mod else ""
+    except Exception:
+        return ""
+
+
+def ytdlp_latest_version():
+    """آخر إصدار منشور على PyPI (استعلام خفيف بدون تنزيل أي شيء)."""
+    req = rq.Request("https://pypi.org/pypi/yt-dlp/json", headers={"User-Agent": UA, "Accept": "application/json"})
+    with rq.urlopen(req, timeout=10) as r:
+        return str(json.loads(r.read().decode("utf-8", errors="replace"))["info"]["version"]).strip()
 
 
 def has_ytdlp_ejs():
@@ -2781,7 +2848,7 @@ class Manager:
         self.settings = {
             "dir": str(dl if dl.exists() else Path.home()),
             "segments": 8, "max_active": 3, "max_speed": 0,
-            "catbox_userhash": "", "confirm_dialog": True, "show_video_btn": True, "ext_updated_notice": False, "category_dirs": {}, "last_dir": ""
+            "catbox_userhash": "", "confirm_dialog": True, "show_video_btn": True, "auto_update_ytdlp": True, "ytdlp_last_check": 0, "ext_updated_notice": False, "category_dirs": {}, "last_dir": ""
         }
         self.items, self.uploads, self.lock, self.slock = {}, {}, threading.RLock(), threading.Lock()
         self._rlock, self._next_time = threading.Lock(), 0.0
@@ -2830,6 +2897,63 @@ class Manager:
                 pass
         threading.Thread(target=self.scheduler, daemon=True).start()
         threading.Thread(target=self._auto_check_update, daemon=True).start()
+        threading.Thread(target=self._auto_update_ytdlp, daemon=True).start()
+
+    def _media_busy(self):
+        try:
+            with self.lock:
+                return any(getattr(i, "kind", "") == "media" and i.status == "downloading" for i in self.items.values())
+        except Exception:
+            return False
+
+    def _auto_update_ytdlp(self):
+        """تحديث yt-dlp تلقائيًا (مرة كل 24 ساعة كحد أقصى) لأن مواقع الفيديو تغيّر طريقتها باستمرار."""
+        time.sleep(25)
+        while True:
+            try:
+                self._ytdlp_update_once()
+            except Exception:
+                pass
+            time.sleep(6 * 3600)
+
+    def _ytdlp_update_once(self):
+        if getattr(sys, "frozen", False):
+            return  # نسخة exe لا تملك pip
+        if not self.settings.get("auto_update_ytdlp", True):
+            return
+        if not get_ytdlp():
+            return  # غير مثبّت: التثبيت الأول يتم من زر «تثبيت تلقائي»
+        if self.installing_ytdlp:
+            return
+        if time.time() - float(self.settings.get("ytdlp_last_check", 0) or 0) < 86400:
+            return
+        # نسجّل وقت المحاولة أولًا حتى لا نكرر المحاولة كل ساعة عند الفشل
+        self.settings["ytdlp_last_check"] = time.time()
+        self.save()
+        cur, latest = ytdlp_installed_version(), ytdlp_latest_version()
+        if not cur or _ver_tuple(latest) <= _ver_tuple(cur):
+            return
+        for _ in range(120):  # ننتظر حتى 20 دقيقة لانتهاء أي تحميل فيديو جارٍ
+            if not self._media_busy():
+                break
+            time.sleep(10)
+        else:
+            return
+        self.installing_ytdlp = True
+        self.install_msg = f"جارٍ تحديث محرك الفيديو تلقائيًا ({cur} ← {latest})..."
+        try:
+            flags = getattr(subprocess, "CREATE_NO_WINDOW", 0) if platform.system() == "Windows" else 0
+            res = subprocess.run(
+                [sys.executable, "-m", "pip", "install", "-U", "--disable-pip-version-check", "yt-dlp[default]"],
+                capture_output=True, text=True, timeout=240, creationflags=flags
+            )
+            if res.returncode == 0:
+                get_ytdlp(force=True)
+                self.install_msg = f"تم تحديث محرك الفيديو إلى {ytdlp_installed_version() or latest}"
+            else:
+                self.install_msg = "تعذّر تحديث محرك الفيديو تلقائيًا (سيستمر بالنسخة الحالية)"
+        finally:
+            self.installing_ytdlp = False
 
     def throttle(self, nbytes, stop):
         kb = self.settings.get("max_speed", 0)
@@ -3104,6 +3228,8 @@ class Manager:
             set_windows_autostart(s["autostart"])
         if "show_video_btn" in d:
             s["show_video_btn"] = bool(d.get("show_video_btn"))
+        if "auto_update_ytdlp" in d:
+            s["auto_update_ytdlp"] = bool(d.get("auto_update_ytdlp"))
         self.save()
         self.aria2.apply_settings()
 
@@ -3259,6 +3385,7 @@ class Manager:
             "upload_speed": sum(u.speed for u in ups if u.status == "uploading"),
             "media_engine": {
                 "ytdlp": bool(get_ytdlp()),
+                "ytdlp_version": ytdlp_installed_version(),
                 "ffmpeg": bool(find_ffmpeg()),
                 "ejs": has_ytdlp_ejs(),
                 "js_runtimes": js_rts,
@@ -3570,34 +3697,25 @@ class Handler(BaseHTTPRequestHandler):
 
 
 def open_window(url):
-    s, c = platform.system(), []
-    if s == "Darwin":
-        c = [f"/Applications/{a}.app/Contents/MacOS/{b}" for a, b in
-             (("Google Chrome", "Google Chrome"), ("Microsoft Edge", "Microsoft Edge"), ("Brave Browser", "Brave Browser"))]
-    elif s == "Windows":
-        for k in ("PROGRAMFILES", "PROGRAMFILES(X86)", "LOCALAPPDATA"):
-            b = os.environ.get(k)
-            if b: c += [os.path.join(b, r"Google\Chrome\Application\chrome.exe"), os.path.join(b, r"Microsoft\Edge\Application\msedge.exe")]
-    else:
-        c = [shutil.which(x) for x in ("google-chrome", "chromium", "microsoft-edge", "chromium-browser")]
+    exe = _find_chromium_exe()
+    if not exe:
+        _notify_no_browser()
+        webbrowser.open(url)
+        return
     profile_dir = APP / "app_profile_v16"
     profile_dir.mkdir(parents=True, exist_ok=True)
-    for x in c:
-        if x and os.path.exists(x):
-            subprocess.Popen([
-                x,
-                f"--app={url}",
-                f"--user-data-dir={profile_dir}",
-                "--app-id=AlDawliDownloads",
-                "--class=AlDawliDownloads",
-                "--no-first-run",
-                "--no-default-browser-check",
-                "--window-size=1140,760",
-            ])
-            if s == "Windows":
-                threading.Thread(target=apply_windows_taskbar_icon, daemon=True).start()
-            return
-    webbrowser.open(url)
+    subprocess.Popen([
+        exe,
+        f"--app={url}",
+        f"--user-data-dir={profile_dir}",
+        "--app-id=AlDawliDownloads",
+        "--class=AlDawliDownloads",
+        "--no-first-run",
+        "--no-default-browser-check",
+        "--window-size=1140,760",
+    ])
+    if platform.system() == "Windows":
+        threading.Thread(target=apply_windows_taskbar_icon, daemon=True).start()
 
 
 def main():
@@ -3802,7 +3920,7 @@ textarea{min-height:120px;resize:vertical;direction:ltr;text-align:left}input.l{
 </style></head><body>
 <div class="app">
 <aside>
- <div class="brand"><img class="logo-img" src="/icon.png?v=3" alt="الدولي للتحميلات"><div><b>الدولي للتحميلات</b><small>الإصدار <span id="appVer">10.17</span></small></div></div>
+ <div class="brand"><img class="logo-img" src="/icon.png?v=3" alt="الدولي للتحميلات"><div><b>الدولي للتحميلات</b><small>الإصدار <span id="appVer">10.18</span></small></div></div>
  <button class="nav" data-f="video"><span data-ic="video"></span>تحميل فيديو</button>
  <button class="nav" data-f="upload"><span data-ic="upload"></span>مركز الرفع<em id="c-upload">0</em></button>
  <button class="nav" data-f="torrent"><span data-ic="magnet"></span>التورنت<em id="c-torrent">0</em></button>
@@ -3957,6 +4075,7 @@ textarea{min-height:120px;resize:vertical;direction:ltr;text-align:left}input.l{
  <label class="ucheck" style="margin-top:12px"><input type="checkbox" id="sConf"><span>إظهار نافذة «معلومات ملف التحميل» قبل بدء التنزيل</span></label>
  <label class="ucheck" style="margin-top:8px"><input type="checkbox" id="sAuto"><span>تشغيل الدولي تلقائيًا مع بدء الويندوز (في صينية النظام)</span></label>
  <label class="ucheck" style="margin-top:8px"><input type="checkbox" id="sVidBtn"><span>إظهار زر التحميل العائم على زاوية الفيديوهات في المتصفح</span></label>
+ <label class="ucheck" style="margin-top:8px"><input type="checkbox" id="sYtdlp"><span>تحديث محرك الفيديو (yt-dlp) تلقائيًا عند توفر إصدار جديد</span></label>
  <div class="row">
   <button class="btn pri" id="okSet">حفظ</button>
   <button class="btn" id="bDeskSc">إنشاء اختصار على سطح المكتب</button>
@@ -4733,8 +4852,8 @@ document.addEventListener('paste',e=>{if($('dialog[open]')||/INPUT|TEXTAREA/.tes
  const t=(e.clipboardData.getData('text')||'').trim();if(/^(https?:\/\/|magnet:\?)/i.test(t))openAdd(t)});
 
 const opt=(s,a,v)=>{s.innerHTML=a.map(x=>`<option${x==v?' selected':''}>${x}</option>`).join('')};
-$('#bSet').onclick=()=>{const s=S.settings;$('#sDir').value=s.dir||'';opt($('#sSeg'),[1,2,4,8,12,16],s.segments);opt($('#sAct'),[1,2,3,4,5,6,8],s.max_active);$('#sSpd').value=s.max_speed||0;$('#sHash').value=s.catbox_userhash||'';$('#sConf').checked=s.confirm_dialog!==false;$('#sAuto').checked=!!s.autostart;$('#sVidBtn').checked=s.show_video_btn!==false;$('#dSet').showModal()};
-$('#okSet').onclick=async()=>{try{await api('/api/settings',{dir:$('#sDir').value,segments:+$('#sSeg').value,max_active:+$('#sAct').value,max_speed:Math.max(0,parseInt($('#sSpd').value,10)||0),catbox_userhash:$('#sHash').value.trim(),confirm_dialog:$('#sConf').checked,autostart:$('#sAuto').checked,show_video_btn:$('#sVidBtn').checked});$('#dSet').close();toast('تم حفظ الإعدادات');tick(true)}catch(e){toast(e.message)}};
+$('#bSet').onclick=()=>{const s=S.settings;$('#sDir').value=s.dir||'';opt($('#sSeg'),[1,2,4,8,12,16],s.segments);opt($('#sAct'),[1,2,3,4,5,6,8],s.max_active);$('#sSpd').value=s.max_speed||0;$('#sHash').value=s.catbox_userhash||'';$('#sConf').checked=s.confirm_dialog!==false;$('#sAuto').checked=!!s.autostart;$('#sVidBtn').checked=s.show_video_btn!==false;$('#sYtdlp').checked=s.auto_update_ytdlp!==false;$('#dSet').showModal()};
+$('#okSet').onclick=async()=>{try{await api('/api/settings',{dir:$('#sDir').value,segments:+$('#sSeg').value,max_active:+$('#sAct').value,max_speed:Math.max(0,parseInt($('#sSpd').value,10)||0),catbox_userhash:$('#sHash').value.trim(),confirm_dialog:$('#sConf').checked,autostart:$('#sAuto').checked,show_video_btn:$('#sVidBtn').checked,auto_update_ytdlp:$('#sYtdlp').checked});$('#dSet').close();toast('تم حفظ الإعدادات');tick(true)}catch(e){toast(e.message)}};
 $('#bChkUpd').onclick=async()=>{try{lastUpdMsg='';await api('/api/update/check',{});toast('جارٍ التحقق من التحديثات...');tick(true)}catch(e){toast(e.message)}};
 $('#bDoUpd').onclick=async()=>{
  try{
