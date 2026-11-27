@@ -1,5 +1,5 @@
 {
-  "version": "10.1",
-  "notes": "إضافة خانة «قريبا» تحت التورنت (تحديث تجريبي).",
+  "version": "10.2",
+  "notes": "إضافة محرك التحميل البديل التلقائي (curl) لتجاوز أخطاء 403 وحمايات Cloudflare على مواقع الأفلام والمسلسلات.",
   "url": "https://raw.githubusercontent.com/momenhijazi0-debug/AlDawli-Downloads/main/aldawli.py"
 }

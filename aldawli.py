@@ -12,7 +12,7 @@ from http.server import ThreadingHTTPServer, BaseHTTPRequestHandler
 from pathlib import Path
 
 APP_TITLE = "الدولي للتحميلات"
-APP_VERSION = "10.1"
+APP_VERSION = "10.2"
 UPDATE_REPO = "momenhijazi0-debug/AlDawli-Downloads"
 UPDATE_MANIFEST_URL = f"https://raw.githubusercontent.com/{UPDATE_REPO}/main/version.json"
 UPDATE_SCRIPT_URL = f"https://raw.githubusercontent.com/{UPDATE_REPO}/main/aldawli.py"
@@ -635,7 +635,13 @@ class Item:
     def seg_done(s): return s[1] is not None and s[2] > s[1]
 
     def _build_headers(self):
-        h = {"User-Agent": UA, "Accept-Encoding": "identity"}
+        h = {
+            "User-Agent": UA,
+            "Accept": "*/*",
+            "Accept-Language": "ar,en-US;q=0.9,en;q=0.8",
+            "Accept-Encoding": "identity",
+            "Connection": "keep-alive",
+        }
         for k, v in (self.headers or {}).items():
             if isinstance(k, str) and isinstance(v, str) and k.lower() not in (
                 "host", "range", "accept-encoding", "content-length"
@@ -904,6 +910,94 @@ class Item:
         self.thread = threading.Thread(target=self._run, args=(prev, self.stop), daemon=True)
         self.thread.start()
 
+
+    def _run_curl_fallback(self, stop):
+        """تحميل بديل عبر curl بهيدرات المتصفح الكاملة لتجاوز حمايات 403/Cloudflare."""
+        curl = shutil.which("curl")
+        if not curl:
+            raise RuntimeError("رفض الخادم الطلب (رمز 403) ولم يتم العثور على curl كمحرك بديل.")
+        os.makedirs(self.dir, exist_ok=True)
+        h = self._build_headers()
+        target_part = self.part_path
+        self.status = "downloading"
+        self.error = ""
+        self.fail_msg = None
+        self.resumable = False
+        self.prepared = True
+        self.mgr.save()
+
+        # فحص الحجم عبر curl -I إن لم يكن معروفًا
+        if self.size <= 0:
+            try:
+                head_cmd = [curl, "-sSIL", "--max-time", "12"]
+                for k, v in h.items():
+                    if k.lower() != "accept-encoding":
+                        head_cmd += ["-H", f"{k}: {v}"]
+                head_cmd.append(self.url)
+                creationflags = getattr(subprocess, "CREATE_NO_WINDOW", 0) if platform.system() == "Windows" else 0
+                hres = subprocess.run(head_cmd, capture_output=True, text=True, errors="replace", timeout=15, creationflags=creationflags)
+                cls = re.findall(r"(?i)^content-length:\s*(\d+)", hres.stdout or "", re.M)
+                if cls:
+                    self.size = int(cls[-1])
+            except Exception:
+                pass
+
+        cmd = [curl, "-sSL", "-f", "-C", "-", "--retry", "3", "--retry-delay", "2", "-o", str(target_part)]
+        kb = int(self.mgr.settings.get("max_speed", 0) or 0)
+        if kb > 0:
+            cmd += ["--limit-rate", f"{kb}k"]
+        for k, v in h.items():
+            if k.lower() != "accept-encoding":
+                cmd += ["-H", f"{k}: {v}"]
+        cmd.append(self.url)
+
+        creationflags = getattr(subprocess, "CREATE_NO_WINDOW", 0) if platform.system() == "Windows" else 0
+        proc = subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, creationflags=creationflags)
+        last_sz = target_part.stat().st_size if target_part.exists() else 0
+        with self._seglock:
+            self.segments = [[0, (self.size - 1) if self.size > 0 else None, last_sz]]
+        t0 = time.monotonic()
+        ts = t0
+        try:
+            while proc.poll() is None:
+                if stop.is_set() or self.stop is not stop:
+                    proc.terminate()
+                    return
+                time.sleep(0.45)
+                cur = target_part.stat().st_size if target_part.exists() else 0
+                now = time.monotonic()
+                v = (cur - last_sz) / max(now - t0, 1e-3)
+                self.speed = v if self.speed == 0 else 0.6 * self.speed + 0.4 * v
+                last_sz, t0 = cur, now
+                with self._seglock:
+                    self.segments = [[0, (self.size - 1) if self.size > 0 else None, cur]]
+                if now - ts > 3:
+                    self.mgr.save()
+                    ts = now
+            _, err_b = proc.communicate()
+            if stop.is_set() or self.stop is not stop:
+                self.speed = 0
+                return
+            self.speed = 0
+            if proc.returncode == 0 and target_part.exists() and target_part.stat().st_size > 0:
+                cur = target_part.stat().st_size
+                with self._seglock:
+                    self.segments = [[0, cur - 1, cur]]
+                self.finish()
+            else:
+                err_txt = (err_b or b"").decode("utf-8", errors="replace").strip()
+                m = re.search(r"error:\s*(\d{3})", err_txt)
+                if m:
+                    self.status, self.error = "error", f"رفض الخادم الطلب (رمز {m.group(1)}) حتى عبر المحرك البديل"
+                else:
+                    self.status, self.error = "error", "فشل التحميل عبر المحرك البديل: " + (err_txt[-120:] or f"رمز {proc.returncode}")
+        finally:
+            if proc.poll() is None:
+                try:
+                    proc.terminate()
+                except Exception:
+                    pass
+
     def _run(self, prev, stop):
         try:
             if prev and prev.is_alive(): prev.join()
@@ -912,7 +1006,14 @@ class Item:
                 self._run_media(stop)
                 return
             if not self.prepared or not self.part_path.exists():
-                self.prepared = False; self.prepare()
+                self.prepared = False
+                try:
+                    self.prepare()
+                except ue.HTTPError as he:
+                    if he.code in (403, 406, 429):
+                        self._run_curl_fallback(stop)
+                        return
+                    raise
             if stop.is_set() or self.stop is not stop: return
             self.status = "downloading"; self.mgr.save()
             with self._seglock:
@@ -929,7 +1030,11 @@ class Item:
                 if now - ts > 3: self.mgr.save(); ts = now
             if self.stop is not stop: return
             self.speed = 0
-            if self.fail_msg: self.status, self.error = "error", self.fail_msg
+            if self.fail_msg:
+                if "403" in self.fail_msg and not stop.is_set():
+                    self._run_curl_fallback(stop)
+                    return
+                self.status, self.error = "error", self.fail_msg
             elif stop.is_set(): pass
             elif all(self.seg_done(s) for s in self.segments): self.finish()
             else: self.status, self.error = "error", "لم يكتمل التنزيل"
@@ -2943,7 +3048,7 @@ textarea{min-height:120px;resize:vertical;direction:ltr;text-align:left}input.l{
 </style></head><body>
 <div class="app">
 <aside>
- <div class="brand"><img class="logo-img" src="/icon.png?v=3" alt="الدولي للتحميلات"><div><b>الدولي للتحميلات</b><small>الإصدار <span id="appVer">10.1</span></small></div></div>
+ <div class="brand"><img class="logo-img" src="/icon.png?v=3" alt="الدولي للتحميلات"><div><b>الدولي للتحميلات</b><small>الإصدار <span id="appVer">10.2</span></small></div></div>
  <button class="nav on" data-f="all"><span data-ic="all"></span>كل التنزيلات<em id="c-all">0</em></button>
  <button class="nav" data-f="active"><span data-ic="down"></span>قيد التنزيل<em id="c-active">0</em></button>
  <button class="nav" data-f="done"><span data-ic="ok"></span>المكتملة<em id="c-done">0</em></button>
