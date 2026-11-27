@@ -12,7 +12,7 @@ from http.server import ThreadingHTTPServer, BaseHTTPRequestHandler
 from pathlib import Path
 
 APP_TITLE = "الدولي للتحميلات"
-APP_VERSION = "10.22"
+APP_VERSION = "10.23"
 UPDATE_REPO = "momenhijazi0-debug/AlDawli-Downloads"
 UPDATE_MANIFEST_URL = f"https://raw.githubusercontent.com/{UPDATE_REPO}/main/version.json"
 UPDATE_SCRIPT_URL = f"https://raw.githubusercontent.com/{UPDATE_REPO}/main/aldawli.py"
@@ -3387,6 +3387,28 @@ class Manager:
 
         def run():
             try:
+                # إذا كان المستخدم يشغّل نسخة EXE قديمة (--onefile بدون مجلد _internal)، نرقّيه صامتًا إلى النسخة الجديدة (--onedir)
+                if getattr(sys, "frozen", False) and platform.system() == "Windows" and not (app_dir() / "_internal").exists():
+                    setup_url = self.update_info.get("setup_url") or UPDATE_SETUP_URL
+                    if setup_url:
+                        self.update_info["msg"] = "جارٍ تنزيل المثبّت الجديد للترقية التلقائية الكاملة..."
+                        sep_s = "&" if "?" in setup_url else "?"
+                        sreq = rq.Request(f"{setup_url}{sep_s}t={int(time.time())}", headers={"User-Agent": UA, "Cache-Control": "no-cache"})
+                        setup_path = Path(tempfile.gettempdir()) / "AlDawli_Setup_Update.exe"
+                        with rq.urlopen(sreq, timeout=120) as sr, open(setup_path, "wb") as sf:
+                            shutil.copyfileobj(sr, sf, 1024 * 256)
+                        if setup_path.exists() and setup_path.stat().st_size > 1_000_000 and setup_path.read_bytes()[:2] == b"MZ":
+                            self.update_info["msg"] = "جارٍ تثبيت النسخة الجديدة تلقائيًا..."
+                            self.shutdown()
+                            _release_single_instance_mutex()
+                            creationflags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+                            subprocess.Popen(
+                                [str(setup_path), "/VERYSILENT", "/SUPPRESSMSGBOXES", "/NORESTART", "/CLOSEAPPLICATIONS"],
+                                creationflags=creationflags,
+                            )
+                            time.sleep(0.4)
+                            os._exit(0)
+
                 dl_url = self.update_info.get("url") or UPDATE_SCRIPT_URL
                 sep = "&" if "?" in dl_url else "?"
                 req = rq.Request(f"{dl_url}{sep}t={int(time.time())}", headers={"User-Agent": UA, "Cache-Control": "no-cache"})
@@ -4310,7 +4332,7 @@ textarea{min-height:120px;resize:vertical;direction:ltr;text-align:left}input.l{
 </style></head><body>
 <div class="app">
 <aside>
- <div class="brand"><img class="logo-img" src="/icon.png?v=3" alt="الدولي للتحميلات"><div><b>الدولي للتحميلات</b><small>الإصدار <span id="appVer">10.22</span></small></div></div>
+ <div class="brand"><img class="logo-img" src="/icon.png?v=3" alt="الدولي للتحميلات"><div><b>الدولي للتحميلات</b><small>الإصدار <span id="appVer">10.23</span></small></div></div>
  <button class="nav" data-f="video"><span data-ic="video"></span>تحميل فيديو</button>
  <button class="nav" data-f="upload"><span data-ic="upload"></span>مركز الرفع<em id="c-upload">0</em></button>
  <button class="nav" data-f="torrent"><span data-ic="magnet"></span>التورنت<em id="c-torrent">0</em></button>
