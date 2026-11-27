@@ -12,7 +12,7 @@ from http.server import ThreadingHTTPServer, BaseHTTPRequestHandler
 from pathlib import Path
 
 APP_TITLE = "الدولي للتحميلات"
-APP_VERSION = "10.0"
+APP_VERSION = "10.1"
 UPDATE_REPO = "momenhijazi0-debug/AlDawli-Downloads"
 UPDATE_MANIFEST_URL = f"https://raw.githubusercontent.com/{UPDATE_REPO}/main/version.json"
 UPDATE_SCRIPT_URL = f"https://raw.githubusercontent.com/{UPDATE_REPO}/main/aldawli.py"
@@ -2910,6 +2910,7 @@ header h1{font-size:22px;margin:0;margin-inline-end:auto}
 .uplayer{margin-top:10px;border-radius:12px;overflow:hidden;background:#000;border:1px solid var(--ln)}
 .uplayer video{width:100%;max-height:360px;display:block}
 #torrentView{padding:16px 24px 28px;overflow:auto;flex:1;display:none;flex-direction:column;gap:16px}
+#soonView{padding:16px 24px 28px;overflow:auto;flex:1;display:none;flex-direction:column;gap:16px}
 #tList{display:flex;flex-direction:column;gap:10px;max-width:860px;width:100%;margin:0 auto}
 
 dialog{border:1px solid var(--ln);border-radius:16px;background:var(--sf);color:var(--tx);padding:22px;width:min(540px,92vw)}
@@ -2942,7 +2943,7 @@ textarea{min-height:120px;resize:vertical;direction:ltr;text-align:left}input.l{
 </style></head><body>
 <div class="app">
 <aside>
- <div class="brand"><img class="logo-img" src="/icon.png?v=3" alt="الدولي للتحميلات"><div><b>الدولي للتحميلات</b><small>الإصدار <span id="appVer">10.0</span></small></div></div>
+ <div class="brand"><img class="logo-img" src="/icon.png?v=3" alt="الدولي للتحميلات"><div><b>الدولي للتحميلات</b><small>الإصدار <span id="appVer">10.1</span></small></div></div>
  <button class="nav on" data-f="all"><span data-ic="all"></span>كل التنزيلات<em id="c-all">0</em></button>
  <button class="nav" data-f="active"><span data-ic="down"></span>قيد التنزيل<em id="c-active">0</em></button>
  <button class="nav" data-f="done"><span data-ic="ok"></span>المكتملة<em id="c-done">0</em></button>
@@ -2951,6 +2952,7 @@ textarea{min-height:120px;resize:vertical;direction:ltr;text-align:left}input.l{
  <button class="nav" data-f="video"><span data-ic="video"></span>تحميل فيديو</button>
  <button class="nav" data-f="upload"><span data-ic="upload"></span>مركز الرفع<em id="c-upload">0</em></button>
  <button class="nav" data-f="torrent"><span data-ic="magnet"></span>التورنت<em id="c-torrent">0</em></button>
+ <button class="nav" data-f="soon"><span data-ic="spark"></span>قريبا</button>
  <div class="sp"></div>
  <div class="speed"><small>السرعة الإجمالية</small><b id="spd">0 بايت/ث</b><span class="cap" id="spdCap"></span></div>
  <button class="nav" id="bSet"><span data-ic="set"></span>الإعدادات</button>
@@ -3067,6 +3069,13 @@ textarea{min-height:120px;resize:vertical;direction:ltr;text-align:left}input.l{
    <button class="btn" id="bClearTor" style="padding:6px 12px;font-size:13px"><span data-ic="trash"></span>مسح المكتملة</button>
   </div>
   <div id="tList"></div>
+ </section>
+
+ <section id="soonView">
+  <div class="ucard" style="text-align:center;padding:48px 24px">
+   <h2 style="font-size:24px;margin-bottom:8px">قريبًا...</h2>
+   <p style="margin:0">ميزات جديدة قيد التطوير! تم الوصول لهذا القسم بنجاح عبر نظام التحديث التلقائي (الإصدار 10.1).</p>
+  </div>
  </section>
 </main></div>
 
@@ -3194,14 +3203,15 @@ copy:'<rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 0 
 ext:'<path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"/><path d="M15 3h6v6"/><path d="M10 14L21 3"/>',
 retry:'<path d="M3 12a9 9 0 1 0 3-6.7L3 8"/><path d="M3 3v5h5"/>',
 x:'<path d="M18 6L6 18M6 6l12 12"/>',
-magnet:'<path d="M6 15V6a2 2 0 0 1 2-2h1v6H8v5a4 4 0 0 0 8 0v-5h-1V4h1a2 2 0 0 1 2 2v9a6 6 0 0 1-12 0z"/>'};
+magnet:'<path d="M6 15V6a2 2 0 0 1 2-2h1v6H8v5a4 4 0 0 0 8 0v-5h-1V4h1a2 2 0 0 1 2 2v9a6 6 0 0 1-12 0z"/>',
+spark:'<path d="M12 3l1.9 5.1L19 10l-5.1 1.9L12 17l-1.9-5.1L5 10l5.1-1.9L12 3z"/>'};
 document.querySelectorAll('[data-ic]').forEach(e=>e.insertAdjacentHTML('afterbegin',sv(I[e.dataset.ic])));
 const B=n=>{if(n<0||n===undefined||n===null)return'—';const u=['بايت','ك.ب','م.ب','ج.ب','ت.ب'];let i=0;while(n>=1024&&i<4){n/=1024;i++}return(i?n.toFixed(n<10?2:1):Math.round(n))+' '+u[i]};
 const D=s=>{s=Math.round(s);const h=s/3600|0,m=s%3600/60|0,x=s%60,p=v=>String(v).padStart(2,'0');return h?`${h}:${p(m)}:${p(x)}`:`${p(m)}:${p(x)}`};
 const esc=s=>String(s||'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 const ST={queued:'في الانتظار',connecting:'جارٍ الاتصال',downloading:'قيد التنزيل',paused:'متوقف مؤقتًا',completed:'مكتمل',error:'فشل'};
 const F={all:()=>1,active:i=>['queued','connecting','downloading'].includes(i.status),done:i=>i.status==='completed',stopped:i=>['paused','error'].includes(i.status)};
-const TT={all:'كل التنزيلات',active:'قيد التنزيل',done:'المكتملة',stopped:'المتوقفة والفاشلة',video:'تحميل فيديو',upload:'مركز الرفع',torrent:'التورنت'};
+const TT={all:'كل التنزيلات',active:'قيد التنزيل',done:'المكتملة',stopped:'المتوقفة والفاشلة',video:'تحميل فيديو',upload:'مركز الرفع',torrent:'التورنت',soon:'قريبا'};
 const UST={processing:'جارٍ تجهيز الفيديو',uploading:'جارٍ الرفع',completed:'تم الرفع',error:'فشل',cancelled:'ملغى'};
 const CAT=[['#d98a00','zip rar 7z tar gz bz2 xz iso'],['#d6336c','mp4 mkv avi mov webm flv'],['#8f4fe0','mp3 flac wav aac ogg m4a'],['#1c9a5a','jpg jpeg png gif webp svg bmp'],['#2447d6','pdf doc docx xls xlsx ppt pptx txt epub'],['#0d9488','exe msi dmg pkg apk deb']];
 const col=e=>(CAT.find(c=>c[1].split(' ').includes(e))||['#667386'])[0];
@@ -3213,12 +3223,13 @@ const act=async(p,b)=>{try{await api(p,b||{});await tick(true)}catch(e){toast(e.
 function setTab(name){
  flt=name;
  document.querySelectorAll('.nav[data-f]').forEach(x=>x.classList.toggle('on',x.dataset.f===name));
- const isV=name==='video',isU=name==='upload',isT=name==='torrent';
+ const isV=name==='video',isU=name==='upload',isT=name==='torrent',isS=name==='soon';
  $('#videoView').style.display=isV?'flex':'none';
  $('#uploadView').style.display=isU?'flex':'none';
  $('#torrentView').style.display=isT?'flex':'none';
- $('#list').style.display=(isV||isU||isT)?'none':'flex';
- if(isV||isU||isT)$('#empty').style.display='none';
+ $('#soonView').style.display=isS?'flex':'none';
+ $('#list').style.display=(isV||isU||isT||isS)?'none':'flex';
+ if(isV||isU||isT||isS)$('#empty').style.display='none';
  if(isT && S.torrent_engine && S.torrent_engine.ready && !S.torrent_engine.running){api('/api/torrent/start_engine',{}).then(()=>tick(true)).catch(()=>{})}
  render();
 }
@@ -3617,7 +3628,7 @@ function render(){
  renderUploads();
  renderTorrents();
  renderUpdate();
- if(flt==='video'||flt==='upload'||flt==='torrent')return;
+ if(flt==='video'||flt==='upload'||flt==='torrent'||flt==='soon')return;
  const vis=S.items.filter(F[flt]),ids=new Set(vis.map(i=>i.id)),list=$('#list');
  for(const[id,el]of els)if(!ids.has(id)){el.remove();els.delete(id)}
  vis.forEach((it,k)=>{let el=els.get(it.id);if(!el){el=make(it);els.set(it.id,el)}upd(el,it);if(list.children[k]!==el)list.insertBefore(el,list.children[k]||null)});
