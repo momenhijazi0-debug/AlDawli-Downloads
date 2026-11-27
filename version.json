@@ -1,5 +1,5 @@
 {
-  "version": "10.4",
-  "notes": "إضافة أيقونة صينية النظام (System Tray) مثل IDM + فتح التطبيق تلقائيًا عند تحميل فيديو + اختيار مجلد الحفظ في قسم الفيديو + تحسين تسجيل Magnet.",
+  "version": "10.6",
+  "notes": "تحديث ملفات إضافة المتصفح (aldawli-ext) تلقائيًا من GitHub مع إشعار تنبيهي + خيار إخفاء/إظهار زر التحميل العائم على الفيديوهات من الإعدادات.",
   "url": "https://raw.githubusercontent.com/momenhijazi0-debug/AlDawli-Downloads/main/aldawli.py"
 }

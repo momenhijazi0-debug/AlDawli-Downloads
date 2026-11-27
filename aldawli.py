@@ -12,7 +12,7 @@ from http.server import ThreadingHTTPServer, BaseHTTPRequestHandler
 from pathlib import Path
 
 APP_TITLE = "الدولي للتحميلات"
-APP_VERSION = "10.4"
+APP_VERSION = "10.6"
 UPDATE_REPO = "momenhijazi0-debug/AlDawli-Downloads"
 UPDATE_MANIFEST_URL = f"https://raw.githubusercontent.com/{UPDATE_REPO}/main/version.json"
 UPDATE_SCRIPT_URL = f"https://raw.githubusercontent.com/{UPDATE_REPO}/main/aldawli.py"
@@ -549,6 +549,27 @@ def open_popup_window(pid):
     ])
     if platform.system() == "Windows":
         threading.Thread(target=bring_title_to_front, args=("معلومات ملف التحميل", True), daemon=True).start()
+    return True
+
+
+def open_video_popup_window(vid):
+    """فتح نافذة منبثقة صغيرة أمام المتصفح مباشرة لاختيار جودة الفيديو ومكان الحفظ (مثل IDM)."""
+    url = f"http://127.0.0.1:{CURRENT_PORT}/vpopup?vid={vid}"
+    exe = _find_chromium_exe()
+    if not exe:
+        return False
+    profile_dir = APP / "app_profile"
+    profile_dir.mkdir(parents=True, exist_ok=True)
+    subprocess.Popen([
+        exe,
+        f"--app={url}",
+        f"--user-data-dir={profile_dir}",
+        "--no-first-run",
+        "--no-default-browser-check",
+        "--window-size=680,580",
+    ])
+    if platform.system() == "Windows":
+        threading.Thread(target=bring_title_to_front, args=("تحميل فيديو — الدولي", True), daemon=True).start()
     return True
 
 
@@ -2159,7 +2180,7 @@ class Aria2Engine:
             TORRENT_META_TMP.mkdir(parents=True, exist_ok=True)
             if not ARIA2_SESSION.exists():
                 ARIA2_SESSION.write_text("", encoding="utf-8")
-            dl_dir = self.mgr.settings.get("dir") or str(Path.home() / "Downloads")
+            dl_dir = self.mgr.settings.get("last_dir") or self.mgr.settings.get("dir") or str(Path.home() / "Downloads")
             os.makedirs(dl_dir, exist_ok=True)
             kb = int(self.mgr.settings.get("max_speed", 0) or 0)
             cmd = [
@@ -2351,7 +2372,10 @@ class Aria2Engine:
         uri = (uri or "").strip()
         if not uri.lower().startswith("magnet:?"):
             raise ValueError("رابط الماجنت غير صالح (يجب أن يبدأ بـ magnet:?)")
-        target_dir = (save_dir or self.mgr.settings.get("dir") or str(Path.home() / "Downloads")).strip()
+        target_dir = (save_dir or self.mgr.settings.get("last_dir") or self.mgr.settings.get("dir") or str(Path.home() / "Downloads")).strip()
+        if save_dir:
+            self.mgr.settings["last_dir"] = target_dir
+            self.mgr.save()
         os.makedirs(target_dir, exist_ok=True)
         opts = {"dir": target_dir, "bt-tracker": PUBLIC_TRACKERS}
         if paused:
@@ -2362,7 +2386,10 @@ class Aria2Engine:
     def add_torrent_b64(self, b64_data, save_dir=None, select_files=None, subfolder="", paused=False):
         if not b64_data:
             raise ValueError("ملف التورنت فارغ")
-        target_dir = (save_dir or self.mgr.settings.get("dir") or str(Path.home() / "Downloads")).strip()
+        target_dir = (save_dir or self.mgr.settings.get("last_dir") or self.mgr.settings.get("dir") or str(Path.home() / "Downloads")).strip()
+        if save_dir:
+            self.mgr.settings["last_dir"] = target_dir
+            self.mgr.save()
         if subfolder:
             target_dir = str(Path(target_dir) / safe_name(subfolder))
         os.makedirs(target_dir, exist_ok=True)
@@ -2536,7 +2563,7 @@ class Manager:
         self.settings = {
             "dir": str(dl if dl.exists() else Path.home()),
             "segments": 8, "max_active": 3, "max_speed": 0,
-            "catbox_userhash": "", "confirm_dialog": True, "category_dirs": {}
+            "catbox_userhash": "", "confirm_dialog": True, "show_video_btn": True, "ext_updated_notice": False, "category_dirs": {}, "last_dir": ""
         }
         self.items, self.uploads, self.lock, self.slock = {}, {}, threading.RLock(), threading.Lock()
         self._rlock, self._next_time = threading.Lock(), 0.0
@@ -2546,6 +2573,7 @@ class Manager:
         self.pending_download = None
         self.pending_magnet = None
         self.popups = {}
+        self.vpopups = {}
         self.aria2 = Aria2Engine(self)
         self.update_info = {
             "current": APP_VERSION,
@@ -2644,8 +2672,9 @@ class Manager:
         p = up.urlparse(url)
         if p.scheme not in ("http", "https") or not p.netloc:
             raise ValueError("الرابط غير صالح (يلزم http أو https)")
-        target_dir = str(Path(save_dir or self.settings["dir"]).expanduser())
+        target_dir = str(Path(save_dir or self.settings.get("last_dir") or self.settings["dir"]).expanduser())
         os.makedirs(target_dir, exist_ok=True)
+        self.settings["last_dir"] = target_dir
         if remember_cat and category:
             cdirs = self.settings.setdefault("category_dirs", {})
             cdirs[category] = target_dir
@@ -2670,8 +2699,9 @@ class Manager:
         fname = safe_name(title or "video")
         if not fname.lower().endswith("." + ext):
             fname = f"{fname}.{ext}"
-        target_dir = str(Path(save_dir or self.settings["dir"]).expanduser())
+        target_dir = str(Path(save_dir or self.settings.get("last_dir") or self.settings["dir"]).expanduser())
         os.makedirs(target_dir, exist_ok=True)
+        self.settings["last_dir"] = target_dir
         i = secrets.token_hex(4)
         with self.lock:
             self.items[i] = Item(self, dict(
@@ -2848,6 +2878,8 @@ class Manager:
         if "autostart" in d:
             s["autostart"] = bool(d.get("autostart"))
             set_windows_autostart(s["autostart"])
+        if "show_video_btn" in d:
+            s["show_video_btn"] = bool(d.get("show_video_btn"))
         self.save()
         self.aria2.apply_settings()
 
@@ -2913,6 +2945,28 @@ class Manager:
                 tmp = target.with_suffix(".py.new")
                 tmp.write_bytes(new_bytes)
                 os.replace(tmp, target)
+
+                # تحديث ملفات إضافة المتصفح (aldawli-ext) تلقائيًا من GitHub إن وُجدت
+                ext_dir = target.parent / "aldawli-ext"
+                ext_dir.mkdir(parents=True, exist_ok=True)
+                ext_updated = False
+                for ef in ("manifest.json", "background.js", "video_btn.js"):
+                    try:
+                        eurl = f"https://raw.githubusercontent.com/{UPDATE_REPO}/main/aldawli-ext/{ef}?t={int(time.time())}"
+                        ereq = rq.Request(eurl, headers={"User-Agent": UA, "Cache-Control": "no-cache"})
+                        with rq.urlopen(ereq, timeout=15) as er:
+                            ebytes = er.read()
+                        if ebytes:
+                            epath = ext_dir / ef
+                            if not epath.exists() or epath.read_bytes() != ebytes:
+                                epath.write_bytes(ebytes)
+                                ext_updated = True
+                    except Exception:
+                        pass
+                if ext_updated:
+                    self.settings["ext_updated_notice"] = True
+                    self.save()
+
                 self.update_info["msg"] = "تم التحديث بنجاح! جارٍ إعادة التشغيل..."
 
                 # إغلاق المحركات وحفظ الحالة ثم إعادة تشغيل السكربت تلقائيًا
@@ -3078,6 +3132,28 @@ class Handler(BaseHTTPRequestHandler):
                         "headers": data.get("headers") or {},
                         "settings": MGR.settings,
                     })
+        elif clean_path == "/vpopup":
+            if self.guard(False):
+                qs = up.parse_qs(up.urlparse(self.path).query)
+                vid = (qs.get("vid") or [""])[0]
+                html = VPOPUP_PAGE.replace("__TOKEN__", TOKEN).replace("__VID__", vid)
+                self.send_any(200, html, "text/html; charset=utf-8")
+        elif clean_path == "/api/vpopup_data":
+            if self.guard():
+                qs = up.parse_qs(up.urlparse(self.path).query)
+                vid = (qs.get("vid") or [""])[0]
+                data = MGR.vpopups.get(vid)
+                if not data:
+                    self.send_any(404, {"error": "الطلب منتهي الصلاحية"})
+                else:
+                    self.send_any(200, {
+                        "url": data["url"],
+                        "headers": data.get("headers") or {},
+                        "settings": MGR.settings,
+                    })
+        elif clean_path == "/api/ext/config":
+            if self.guard(need_token=not self.is_ext_origin()):
+                self.send_any(200, {"show_video_btn": bool(MGR.settings.get("show_video_btn", True))})
         elif clean_path == "/api/state":
             if self.guard(): self.send_any(200, MGR.state())
         else:
@@ -3194,9 +3270,18 @@ class Handler(BaseHTTPRequestHandler):
                 else:
                     r = MGR.add(urls, d.get("headers"))
             elif p == "/api/ext/video":
-                MGR.pending_video = {"url": d.get("url", ""), "headers": d.get("headers") or {}}
-                threading.Thread(target=show_or_open_main_window, daemon=True).start()
-                r = {"ok": True}
+                vurl = (d.get("url") or "").strip()
+                vhdrs = d.get("headers") or {}
+                vid = secrets.token_hex(6)
+                MGR.vpopups[vid] = {"url": vurl, "headers": vhdrs, "ts": time.time()}
+                for k in list(MGR.vpopups.keys()):
+                    if time.time() - MGR.vpopups[k]["ts"] > 600:
+                        MGR.vpopups.pop(k, None)
+                opened = open_video_popup_window(vid)
+                if not opened:
+                    MGR.pending_video = {"url": vurl, "headers": vhdrs}
+                    threading.Thread(target=show_or_open_main_window, daemon=True).start()
+                r = {"ok": True, "popup": opened}
             elif p == "/api/media/probe": r = probe_media(d.get("url", ""), d.get("headers"))
             elif p == "/api/media/add":
                 r = MGR.add_media(d.get("url"), d.get("title"), d.get("format_id"),
@@ -3219,6 +3304,9 @@ class Handler(BaseHTTPRequestHandler):
                 [MGR.remove(i) for i, it in list(MGR.items.items()) if it.status == "completed"]
             elif p == "/api/open": open_path(MGR.items[d["id"]], d.get("what", "folder"))
             elif p == "/api/settings": MGR.set_settings(d)
+            elif p == "/api/dismiss_ext_notice":
+                MGR.settings["ext_updated_notice"] = False
+                MGR.save()
             elif p == "/api/update/check": r = MGR.check_update(manual=True)
             elif p == "/api/update/apply": r = MGR.apply_update()
             elif p == "/api/quit":
@@ -3449,7 +3537,7 @@ textarea{min-height:120px;resize:vertical;direction:ltr;text-align:left}input.l{
 </style></head><body>
 <div class="app">
 <aside>
- <div class="brand"><img class="logo-img" src="/icon.png?v=3" alt="الدولي للتحميلات"><div><b>الدولي للتحميلات</b><small>الإصدار <span id="appVer">10.4</span></small></div></div>
+ <div class="brand"><img class="logo-img" src="/icon.png?v=3" alt="الدولي للتحميلات"><div><b>الدولي للتحميلات</b><small>الإصدار <span id="appVer">10.6</span></small></div></div>
  <button class="nav on" data-f="all"><span data-ic="all"></span>كل التنزيلات<em id="c-all">0</em></button>
  <button class="nav" data-f="active"><span data-ic="down"></span>قيد التنزيل<em id="c-active">0</em></button>
  <button class="nav" data-f="done"><span data-ic="ok"></span>المكتملة<em id="c-done">0</em></button>
@@ -3474,6 +3562,7 @@ textarea{min-height:120px;resize:vertical;direction:ltr;text-align:left}input.l{
   <button class="btn" id="bGoVideo"><span data-ic="video"></span>فيديو</button>
   <button class="btn pri" id="bAdd"><span data-ic="plus"></span>إضافة رابط</button></header>
  <div id="updBar"><div style="flex:1"><b id="updTtl">يتوفر تحديث جديد!</b><small id="updNotes"></small></div><button class="btn pri" id="bDoUpd">تحديث وإعادة التشغيل الآن</button></div>
+ <div id="extBar" style="margin:8px 24px 0;padding:11px 16px;border-radius:12px;background:color-mix(in srgb,#d98a00 14%,var(--sf));border:1px solid #d98a00;display:none;align-items:center;gap:12px;flex-wrap:wrap"><div style="flex:1"><b style="color:#d98a00;font-size:14px">تم تحديث ملفات إضافة المتصفح (aldawli-ext) تلقائيًا!</b><small style="color:var(--tx);font-size:13px;display:block">افتح صفحة الإضافات في متصفحك (edge://extensions أو chrome://extensions) واضغط زر التحديث (↻) على إضافة الدولي لتفعيل التحديث الجديد.</small></div><button class="btn" id="bDisExt">فهمت، إخفاء</button></div>
  <div id="list"></div>
  <div id="empty"><h2>لا توجد تنزيلات هنا</h2><p>الصق رابطًا (Ctrl+V) أو اضغط «إضافة رابط» أو افتح قسم «تحميل فيديو» ليوتيوب وإنستغرام.</p></div>
 
@@ -3609,6 +3698,7 @@ textarea{min-height:120px;resize:vertical;direction:ltr;text-align:left}input.l{
  <label for="sHash">رمز حساب Catbox (Userhash — اختياري لحذف مرفوعاتك من السيرفر لاحقًا)</label><input class="l" id="sHash" placeholder="اتركه فارغًا للرفع المجهول المباشر">
  <label class="ucheck" style="margin-top:12px"><input type="checkbox" id="sConf"><span>إظهار نافذة «معلومات ملف التحميل» قبل بدء التنزيل (مثل IDM)</span></label>
  <label class="ucheck" style="margin-top:8px"><input type="checkbox" id="sAuto"><span>تشغيل الدولي تلقائيًا مع بدء الويندوز (في صينية النظام مثل IDM)</span></label>
+ <label class="ucheck" style="margin-top:8px"><input type="checkbox" id="sVidBtn"><span>إظهار زر التحميل العائم على زاوية الفيديوهات في المتصفح</span></label>
  <div class="row">
   <button class="btn pri" id="okSet">حفظ</button>
   <button class="btn" id="bDeskSc">إنشاء اختصار على سطح المكتب</button>
@@ -3745,7 +3835,7 @@ function setTab(name){
  $('#soonView').style.display=isS?'flex':'none';
  $('#list').style.display=(isV||isU||isT||isS)?'none':'flex';
  if(isV||isU||isT||isS)$('#empty').style.display='none';
- if(isV && !$('#vDir').value && S.settings && S.settings.dir)$('#vDir').value=S.settings.dir;
+ if(isV && !$('#vDir').value && S.settings)$('#vDir').value=S.settings.last_dir||S.settings.dir||'';
  if(isT && S.torrent_engine && S.torrent_engine.ready && !S.torrent_engine.running){api('/api/torrent/start_engine',{}).then(()=>tick(true)).catch(()=>{})}
  render();
 }
@@ -4020,7 +4110,7 @@ async function openDownloadInfo(url, headers){
  updateInfoIcon(initName);
  const applyCatDir=(cat)=>{
   const cdirs=(S.settings&&S.settings.category_dirs)||{};
-  $('#iDir').value=cdirs[cat]||(S.settings&&S.settings.dir)||'';
+  $('#iDir').value=cdirs[cat]||(S.settings&&(S.settings.last_dir||S.settings.dir))||'';
   $('#iRemTxt').textContent=`تذكر هذا المسار لفئة «${cat}»`;
  };
  const c0=guessCat(initName);
@@ -4144,6 +4234,7 @@ function render(){
  renderUploads();
  renderTorrents();
  renderUpdate();
+ $('#extBar').style.display=(S.settings&&S.settings.ext_updated_notice)?'flex':'none';
  if(flt==='video'||flt==='upload'||flt==='torrent'||flt==='soon')return;
  const vis=S.items.filter(F[flt]),ids=new Set(vis.map(i=>i.id)),list=$('#list');
  for(const[id,el]of els)if(!ids.has(id)){el.remove();els.delete(id)}
@@ -4384,8 +4475,8 @@ document.addEventListener('paste',e=>{if($('dialog[open]')||/INPUT|TEXTAREA/.tes
  const t=(e.clipboardData.getData('text')||'').trim();if(/^(https?:\/\/|magnet:\?)/i.test(t))openAdd(t)});
 $('#bPauAll').onclick=()=>act('/api/pause_all');$('#bResAll').onclick=()=>act('/api/resume_all');$('#bClear').onclick=()=>act('/api/clear_done');
 const opt=(s,a,v)=>{s.innerHTML=a.map(x=>`<option${x==v?' selected':''}>${x}</option>`).join('')};
-$('#bSet').onclick=()=>{const s=S.settings;$('#sDir').value=s.dir||'';opt($('#sSeg'),[1,2,4,8,12,16],s.segments);opt($('#sAct'),[1,2,3,4,5,6,8],s.max_active);$('#sSpd').value=s.max_speed||0;$('#sHash').value=s.catbox_userhash||'';$('#sConf').checked=s.confirm_dialog!==false;$('#sAuto').checked=!!s.autostart;$('#dSet').showModal()};
-$('#okSet').onclick=async()=>{try{await api('/api/settings',{dir:$('#sDir').value,segments:+$('#sSeg').value,max_active:+$('#sAct').value,max_speed:Math.max(0,parseInt($('#sSpd').value,10)||0),catbox_userhash:$('#sHash').value.trim(),confirm_dialog:$('#sConf').checked,autostart:$('#sAuto').checked});$('#dSet').close();toast('تم حفظ الإعدادات');tick(true)}catch(e){toast(e.message)}};
+$('#bSet').onclick=()=>{const s=S.settings;$('#sDir').value=s.dir||'';opt($('#sSeg'),[1,2,4,8,12,16],s.segments);opt($('#sAct'),[1,2,3,4,5,6,8],s.max_active);$('#sSpd').value=s.max_speed||0;$('#sHash').value=s.catbox_userhash||'';$('#sConf').checked=s.confirm_dialog!==false;$('#sAuto').checked=!!s.autostart;$('#sVidBtn').checked=s.show_video_btn!==false;$('#dSet').showModal()};
+$('#okSet').onclick=async()=>{try{await api('/api/settings',{dir:$('#sDir').value,segments:+$('#sSeg').value,max_active:+$('#sAct').value,max_speed:Math.max(0,parseInt($('#sSpd').value,10)||0),catbox_userhash:$('#sHash').value.trim(),confirm_dialog:$('#sConf').checked,autostart:$('#sAuto').checked,show_video_btn:$('#sVidBtn').checked});$('#dSet').close();toast('تم حفظ الإعدادات');tick(true)}catch(e){toast(e.message)}};
 $('#bChkUpd').onclick=async()=>{try{lastUpdMsg='';await api('/api/update/check',{});toast('جارٍ التحقق من التحديثات...');tick(true)}catch(e){toast(e.message)}};
 $('#bDoUpd').onclick=async()=>{
  try{
@@ -4396,6 +4487,7 @@ $('#bDoUpd').onclick=async()=>{
 };
 $('#bRegMag').onclick=async()=>{try{const r=await api('/api/register_magnet',{});toast(r.locked_by_other?'تم التسجيل! اختر «الدولي للتحميلات» لبروتوكول MAGNET من نافذة إعدادات ويندوز التي فُتحت الآن.':'تم تعيين الدولي للتحميلات كبرنامج افتراضي لروابط Magnet بنجاح!')}catch(e){toast(e.message)}};
 $('#bDeskSc').onclick=async()=>{try{await api('/api/create_shortcut',{});toast('تم إنشاء اختصار «الدولي للتحميلات» على سطح المكتب!')}catch(e){toast(e.message)}};
+$('#bDisExt').onclick=()=>act('/api/dismiss_ext_notice');
 $('#bQuit').onclick=async()=>{try{await api('/api/quit',{})}catch(e){}$('#bye').style.display='grid'};
 tick();
 </script></body></html>'''
@@ -4477,7 +4569,7 @@ const CMAP=[['مضغوط',['zip','rar','7z','tar','gz','bz2','xz','iso']],['في
 const guessCat=fn=>{const x=(fn&&fn.includes('.')?fn.split('.').pop().toLowerCase():'');const f=CMAP.find(c=>c[1].includes(x));return f?f[0]:'عام'};
 let hdrs={},cfg={};
 function setIc(fn){const x=(fn&&fn.includes('.')?fn.split('.').pop().toLowerCase():'');$('#iIcon').style.setProperty('--c',col(x));$('#iIcon').textContent=(x||'FILE').slice(0,4).toUpperCase();$('#iExt').textContent=x?x.toUpperCase():''}
-function applyCat(c){const d=(cfg.category_dirs||{})[c]||cfg.dir||'';$('#iDir').value=d;$('#iRemTxt').textContent=`تذكر هذا المسار لفئة «${c}»`}
+function applyCat(c){const d=(cfg.category_dirs||{})[c]||cfg.last_dir||cfg.dir||'';$('#iDir').value=d;$('#iRemTxt').textContent=`تذكر هذا المسار لفئة «${c}»`}
 $('#iCat').onchange=()=>applyCat($('#iCat').value);
 $('#iName').oninput=()=>setIc($('#iName').value);
 $('#iBrowse').onclick=async()=>{try{const r=await api('/api/browse_dir',{initial:$('#iDir').value});if(r.dir)$('#iDir').value=r.dir}catch(e){$('#err').textContent=e.message}};
@@ -4507,6 +4599,87 @@ $('#iLater').onclick=()=>go(false);
   if(info.warning){$('#err').textContent=info.warning;$('#iSize').textContent='تنبيه'}
   else{$('#iSize').textContent=info.size>0?B(info.size):'حجم غير معروف'}
  }catch(e){$('#err').textContent=e.message}
+})();
+</script></body></html>"""
+
+
+VPOPUP_PAGE = r"""<!doctype html>
+<html lang="ar" dir="rtl"><head><meta charset="utf-8"><title>تحميل فيديو — الدولي</title>
+<link rel="icon" type="image/png" sizes="256x256" href="/icon.png?v=3">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<style>
+:root{--bg:#eef0f3;--sf:#fff;--tx:#121b26;--mu:#667386;--ln:#dde2e8;--ac:#2447d6;--ac2:#e6ebfc;--er:#cf3a3a;color-scheme:light dark}
+@media(prefers-color-scheme:dark){:root{--bg:#0d1218;--sf:#151c24;--tx:#e7ecf2;--mu:#8995a6;--ln:#252f3b;--ac:#7c9bff;--ac2:#1b2748;--er:#ff7878}}
+*{box-sizing:border-box}
+body{margin:0;padding:18px;background:var(--sf);color:var(--tx);font:14.5px/1.55 "SF Arabic","Segoe UI",Tahoma,system-ui,sans-serif}
+button,input{font:inherit;color:inherit}
+h2{margin:0 0 12px;font-size:18px;display:flex;align-items:center;gap:10px}
+h2 img{width:28px;height:28px;border-radius:7px}
+label{display:block;font-size:12.5px;color:var(--mu);margin:8px 0 4px}
+input{width:100%;border:1px solid var(--ln);background:var(--bg);border-radius:10px;padding:8px 11px;direction:ltr;text-align:left}
+.inrow{display:flex;gap:6px;align-items:center}.inrow input{flex:1}
+.btn{display:inline-flex;align-items:center;justify-content:center;gap:6px;border:1px solid var(--ln);background:var(--bg);border-radius:10px;padding:8px 14px;cursor:pointer}
+.btn:hover{border-color:var(--ac)}
+.vinfo{display:grid;grid-template-columns:180px 1fr;gap:14px;align-items:start;margin-top:12px}
+.vthumb{width:100%;aspect-ratio:16/9;object-fit:cover;border-radius:10px;background:var(--bg);border:1px solid var(--ln)}
+.vtitle{font-size:15.5px;font-weight:700;margin:0 0 4px;line-height:1.4}
+.vsub{color:var(--mu);font-size:12.5px;display:flex;gap:10px;flex-wrap:wrap}
+.fmts{display:grid;grid-template-columns:repeat(auto-fill,minmax(195px,1fr));gap:8px;margin-top:14px}
+.fbtn{display:flex;align-items:center;justify-content:space-between;gap:8px;padding:10px 12px;border-radius:11px;border:1px solid var(--ln);background:var(--bg);cursor:pointer;text-align:start}
+.fbtn:hover{border-color:var(--ac)}.fbtn:disabled{opacity:.55;cursor:not-allowed}
+.fbtn b{display:block;font-size:13.5px}.fbtn small{color:var(--mu);font-size:11.5px}
+.fext{font-size:11px;font-weight:700;padding:2px 7px;border-radius:7px;background:var(--ac2);color:var(--ac);direction:ltr}
+.fbtn.aud .fext{background:color-mix(in srgb,#8f4fe0 18%,transparent);color:#8f4fe0}
+#msg{margin-top:14px;font-size:13.5px;color:var(--mu);text-align:center}
+#msg.er{color:var(--er);font-weight:600}
+</style></head><body>
+<h2><img src="/icon.png?v=3" alt="">تحميل فيديو — الدولي للتحميلات</h2>
+<label for="vDir">مجلد الحفظ (يتذكر آخر مجلد تلقائيًا)</label>
+<div class="inrow">
+ <input id="vDir">
+ <button class="btn" id="vBrowse" type="button" title="اختيار مجلد">...</button>
+</div>
+<div id="msg">جارٍ فحص الفيديو وجلب الجودات المتاحة...</div>
+<div id="res"></div>
+<script>
+const T="__TOKEN__",VID="__VID__",$=s=>document.querySelector(s);
+const api=async(p,b)=>{const r=await fetch(p,{method:b===undefined?'GET':'POST',headers:{'X-Token':T,'Content-Type':'application/json'},body:b===undefined?undefined:JSON.stringify(b)});const j=await r.json().catch(()=>({}));if(!r.ok)throw new Error(j.error||'حدث خطأ');return j};
+const B=n=>{if(n<0||n===undefined||n===null)return'—';const u=['بايت','ك.ب','م.ب','ج.ب','ت.ب'];let i=0;while(n>=1024&&i<4){n/=1024;i++}return(i?n.toFixed(n<10?2:1):Math.round(n))+' '+u[i]};
+const D=s=>{s=Math.round(s);const h=s/3600|0,m=s%3600/60|0,x=s%60,p=v=>String(v).padStart(2,'0');return h?`${h}:${p(m)}:${p(x)}`:`${p(m)}:${p(x)}`};
+const esc=s=>String(s||'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+$('#vBrowse').onclick=async()=>{try{const r=await api('/api/browse_dir',{initial:$('#vDir').value});if(r.dir)$('#vDir').value=r.dir}catch(e){}};
+(async()=>{
+ try{
+  const d=await api('/api/vpopup_data?vid='+encodeURIComponent(VID));
+  const cfg=d.settings||{};
+  $('#vDir').value=cfg.last_dir||cfg.dir||'';
+  const info=await api('/api/media/probe',{url:d.url,headers:d.headers||{}});
+  $('#msg').textContent='';
+  const dur=info.duration?D(info.duration):'';
+  $('#res').innerHTML=`<div class="vinfo">
+   ${info.thumbnail?`<img class="vthumb" src="${esc(info.thumbnail)}" alt="">`:'<div class="vthumb"></div>'}
+   <div>
+    <div class="vtitle">${esc(info.title)}</div>
+    <div class="vsub">${info.site?`<span>${esc(info.site)}</span>`:''}${info.uploader?`<span>${esc(info.uploader)}</span>`:''}${dur?`<span>${dur}</span>`:''}</div>
+   </div>
+  </div>
+  <div class="fmts">${info.formats.map((f,idx)=>`
+   <button class="fbtn${f.audio_only?' aud':''}" data-fi="${idx}">
+    <div><b>${esc(f.label)}</b><small>${f.size>0?B(f.size):'حجم تقديري'}</small></div>
+    <span class="fext">${esc(f.ext)}</span>
+   </button>`).join('')}</div>`;
+  $('#res').querySelectorAll('[data-fi]').forEach(b=>b.onclick=async()=>{
+   const f=info.formats[+b.dataset.fi];
+   b.disabled=true;
+   try{
+    await api('/api/media/add',{url:info.url,title:info.title,format_id:f.format_id,audio_only:f.audio_only,ext:f.ext,size:f.size,headers:d.headers||{},yt_clients:f.yt_clients||null,dir:$('#vDir').value.trim()});
+    window.close();
+   }catch(e){$('#msg').className='er';$('#msg').textContent=e.message;b.disabled=false}
+  });
+ }catch(e){
+  $('#msg').className='er';
+  $('#msg').textContent=e.message;
+ }
 })();
 </script></body></html>"""
 
