@@ -1,5 +1,5 @@
 {
-  "version": "10.14",
-  "notes": "إزالة الأزرار الإضافية من الشريط العلوي والإبقاء على زر «إضافة رابط» فقط.",
+  "version": "10.17",
+  "notes": "إصلاح أيقونة التثبيت (Pin) في شريط المهام: لم يعد التطبيق يظهر بأيقونة Google Chrome.",
   "url": "https://raw.githubusercontent.com/momenhijazi0-debug/AlDawli-Downloads/main/aldawli.py"
 }
