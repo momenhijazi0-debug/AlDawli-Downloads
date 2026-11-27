@@ -1,5 +1,5 @@
 {
-  "version": "10.12",
-  "notes": "تسريع فحص روابط تيك توك والمنصات لتظهر الجودات خلال ثوانٍ معدودة بدل الانتظار الطويل.",
+  "version": "10.14",
+  "notes": "إزالة الأزرار الإضافية من الشريط العلوي والإبقاء على زر «إضافة رابط» فقط.",
   "url": "https://raw.githubusercontent.com/momenhijazi0-debug/AlDawli-Downloads/main/aldawli.py"
 }

@@ -12,7 +12,7 @@ from http.server import ThreadingHTTPServer, BaseHTTPRequestHandler
 from pathlib import Path
 
 APP_TITLE = "الدولي للتحميلات"
-APP_VERSION = "10.12"
+APP_VERSION = "10.14"
 UPDATE_REPO = "momenhijazi0-debug/AlDawli-Downloads"
 UPDATE_MANIFEST_URL = f"https://raw.githubusercontent.com/{UPDATE_REPO}/main/version.json"
 UPDATE_SCRIPT_URL = f"https://raw.githubusercontent.com/{UPDATE_REPO}/main/aldawli.py"
@@ -3422,7 +3422,13 @@ class Handler(BaseHTTPRequestHandler):
             elif p == "/api/update/check": r = MGR.check_update(manual=True)
             elif p == "/api/update/apply": r = MGR.apply_update()
             elif p == "/api/quit":
-                def bye(): time.sleep(0.3); MGR.shutdown(); os._exit(0)
+                def bye():
+                    try:
+                        MGR.shutdown()
+                    except Exception:
+                        pass
+                    time.sleep(0.25)
+                    os._exit(0)
                 threading.Thread(target=bye, daemon=True).start()
             else: return self.send_any(404, {"error": "not found"})
             self.send_any(200, r)
@@ -3500,6 +3506,17 @@ def main():
     CURRENT_PORT = port
     url = f"http://127.0.0.1:{port}/"
     print(f"{APP_TITLE} يعمل على {url}  (اضغط Ctrl+C للإنهاء)")
+    if platform.system() == "Windows":
+        def _clean_old_mei():
+            try:
+                tmp_root = Path(tempfile.gettempdir())
+                my_mei = Path(getattr(sys, "_MEIPASS", "")).name if getattr(sys, "_MEIPASS", None) else ""
+                for p in tmp_root.glob("_MEI*"):
+                    if p.is_dir() and p.name != my_mei:
+                        shutil.rmtree(p, ignore_errors=True)
+            except Exception:
+                pass
+        threading.Thread(target=_clean_old_mei, daemon=True).start()
     start_windows_tray()
     if not a.no_window: open_window(url)
     try: srv.serve_forever()
@@ -3649,7 +3666,7 @@ textarea{min-height:120px;resize:vertical;direction:ltr;text-align:left}input.l{
 </style></head><body>
 <div class="app">
 <aside>
- <div class="brand"><img class="logo-img" src="/icon.png?v=3" alt="الدولي للتحميلات"><div><b>الدولي للتحميلات</b><small>الإصدار <span id="appVer">10.12</span></small></div></div>
+ <div class="brand"><img class="logo-img" src="/icon.png?v=3" alt="الدولي للتحميلات"><div><b>الدولي للتحميلات</b><small>الإصدار <span id="appVer">10.14</span></small></div></div>
  <button class="nav" data-f="video"><span data-ic="video"></span>تحميل فيديو</button>
  <button class="nav" data-f="upload"><span data-ic="upload"></span>مركز الرفع<em id="c-upload">0</em></button>
  <button class="nav" data-f="torrent"><span data-ic="magnet"></span>التورنت<em id="c-torrent">0</em></button>
@@ -3665,12 +3682,6 @@ textarea{min-height:120px;resize:vertical;direction:ltr;text-align:left}input.l{
 </aside>
 <main>
  <header><h1 id="ttl">كل التنزيلات</h1>
-  <button class="btn ib" id="bResAll" title="استئناف الكل" data-ic="play"></button>
-  <button class="btn ib" id="bPauAll" title="إيقاف الكل مؤقتًا" data-ic="pause"></button>
-  <button class="btn ib" id="bClear" title="مسح المكتملة من القائمة" data-ic="trash"></button>
-  <button class="btn" id="bGoTorrent"><span data-ic="magnet"></span>تورنت</button>
-  <button class="btn" id="bGoUpload"><span data-ic="upload"></span>رفع ملف</button>
-  <button class="btn" id="bGoVideo"><span data-ic="video"></span>فيديو</button>
   <button class="btn pri" id="bAdd"><span data-ic="plus"></span>إضافة رابط</button></header>
  <div id="updBar"><div style="flex:1"><b id="updTtl">يتوفر تحديث جديد!</b><small id="updNotes"></small></div><button class="btn pri" id="bDoUpd">تحديث وإعادة التشغيل الآن</button></div>
  <div id="extBar" style="margin:8px 24px 0;padding:11px 16px;border-radius:12px;background:color-mix(in srgb,#d98a00 14%,var(--sf));border:1px solid #d98a00;display:none;align-items:center;gap:12px;flex-wrap:wrap"><div style="flex:1"><b style="color:#d98a00;font-size:14px">تم تحديث ملفات إضافة المتصفح (aldawli-ext) تلقائيًا!</b><small style="color:var(--tx);font-size:13px;display:block">افتح صفحة الإضافات في متصفحك (edge://extensions أو chrome://extensions) واضغط زر التحديث (↻) على إضافة الدولي لتفعيل التحديث الجديد.</small></div><button class="btn" id="bDisExt">فهمت، إخفاء</button></div>
@@ -4423,9 +4434,9 @@ async function tick(once){
 }
 
 document.querySelectorAll('.nav[data-f]').forEach(b=>b.onclick=()=>setTab(b.dataset.f));
-$('#bGoVideo').onclick=()=>{setTab('video');$('#vUrl').focus()};
-$('#bGoUpload').onclick=()=>setTab('upload');
-$('#bGoTorrent').onclick=()=>{setTab('torrent');$('#tMagnet').focus()};
+
+
+
 $('#tAddBtn').onclick=()=>addMagnetUri(null,false);
 $('#tFastBtn').onclick=()=>addMagnetUri(null,true);
 $('#iCat').onchange=()=>{
@@ -4584,7 +4595,7 @@ $('#okAdd').onclick=async()=>{
 };
 document.addEventListener('paste',e=>{if($('dialog[open]')||/INPUT|TEXTAREA/.test(document.activeElement.tagName))return;
  const t=(e.clipboardData.getData('text')||'').trim();if(/^(https?:\/\/|magnet:\?)/i.test(t))openAdd(t)});
-$('#bPauAll').onclick=()=>act('/api/pause_all');$('#bResAll').onclick=()=>act('/api/resume_all');$('#bClear').onclick=()=>act('/api/clear_done');
+
 const opt=(s,a,v)=>{s.innerHTML=a.map(x=>`<option${x==v?' selected':''}>${x}</option>`).join('')};
 $('#bSet').onclick=()=>{const s=S.settings;$('#sDir').value=s.dir||'';opt($('#sSeg'),[1,2,4,8,12,16],s.segments);opt($('#sAct'),[1,2,3,4,5,6,8],s.max_active);$('#sSpd').value=s.max_speed||0;$('#sHash').value=s.catbox_userhash||'';$('#sConf').checked=s.confirm_dialog!==false;$('#sAuto').checked=!!s.autostart;$('#sVidBtn').checked=s.show_video_btn!==false;$('#dSet').showModal()};
 $('#okSet').onclick=async()=>{try{await api('/api/settings',{dir:$('#sDir').value,segments:+$('#sSeg').value,max_active:+$('#sAct').value,max_speed:Math.max(0,parseInt($('#sSpd').value,10)||0),catbox_userhash:$('#sHash').value.trim(),confirm_dialog:$('#sConf').checked,autostart:$('#sAuto').checked,show_video_btn:$('#sVidBtn').checked});$('#dSet').close();toast('تم حفظ الإعدادات');tick(true)}catch(e){toast(e.message)}};
