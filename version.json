@@ -1,5 +1,5 @@
 {
-  "version": "10.2",
-  "notes": "إضافة محرك التحميل البديل التلقائي (curl) لتجاوز أخطاء 403 وحمايات Cloudflare على مواقع الأفلام والمسلسلات.",
+  "version": "10.3",
+  "notes": "إضافة نافذة التحميل المنبثقة أمام المتصفح مباشرة (مثل IDM) + تعيين الدولي كبرنامج افتراضي لروابط Magnet.",
   "url": "https://raw.githubusercontent.com/momenhijazi0-debug/AlDawli-Downloads/main/aldawli.py"
 }

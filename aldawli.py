@@ -12,7 +12,7 @@ from http.server import ThreadingHTTPServer, BaseHTTPRequestHandler
 from pathlib import Path
 
 APP_TITLE = "الدولي للتحميلات"
-APP_VERSION = "10.2"
+APP_VERSION = "10.3"
 UPDATE_REPO = "momenhijazi0-debug/AlDawli-Downloads"
 UPDATE_MANIFEST_URL = f"https://raw.githubusercontent.com/{UPDATE_REPO}/main/version.json"
 UPDATE_SCRIPT_URL = f"https://raw.githubusercontent.com/{UPDATE_REPO}/main/aldawli.py"
@@ -230,6 +230,127 @@ def _save_lnk_unicode(lnk_path, target_path, arguments, working_dir, icon_path, 
         if co_hr in (0, 1):
             ole32.CoUninitialize()
 
+
+
+def register_magnet_protocol():
+    """تسجيل الدولي للتحميلات كبرنامج افتراضي لروابط magnet: في ويندوز (بدون الحاجة لصلاحيات مسؤول)."""
+    if platform.system() != "Windows":
+        raise RuntimeError("تسجيل بروتوكول Magnet مدعوم على نظام Windows فقط")
+    import winreg
+    ico_path = str(ensure_icon_file())
+    if getattr(sys, "frozen", False):
+        cmd_str = f'"{Path(sys.executable).resolve()}" --magnet "%1"'
+    else:
+        py_exe = Path(sys.executable).resolve()
+        pyw_exe = py_exe.with_name("pythonw.exe")
+        runner = pyw_exe if pyw_exe.exists() else py_exe
+        script_path = Path(__file__).resolve()
+        cmd_str = f'"{runner}" "{script_path}" --magnet "%1"'
+
+    base = r"Software\Classes\magnet"
+    with winreg.CreateKey(winreg.HKEY_CURRENT_USER, base) as k:
+        winreg.SetValueEx(k, "", 0, winreg.REG_SZ, f"URL:{APP_TITLE}")
+        winreg.SetValueEx(k, "URL Protocol", 0, winreg.REG_SZ, "")
+    with winreg.CreateKey(winreg.HKEY_CURRENT_USER, base + r"\DefaultIcon") as k:
+        winreg.SetValueEx(k, "", 0, winreg.REG_SZ, f'"{ico_path}",0')
+    with winreg.CreateKey(winreg.HKEY_CURRENT_USER, base + r"\shell\open\command") as k:
+        winreg.SetValueEx(k, "", 0, winreg.REG_SZ, cmd_str)
+    return True
+
+
+def _find_chromium_exe():
+    s, c = platform.system(), []
+    if s == "Darwin":
+        c = [f"/Applications/{a}.app/Contents/MacOS/{b}" for a, b in
+             (("Google Chrome", "Google Chrome"), ("Microsoft Edge", "Microsoft Edge"), ("Brave Browser", "Brave Browser"))]
+    elif s == "Windows":
+        for k in ("PROGRAMFILES", "PROGRAMFILES(X86)", "LOCALAPPDATA"):
+            b = os.environ.get(k)
+            if b:
+                c += [
+                    os.path.join(b, r"Google\Chrome\Application\chrome.exe"),
+                    os.path.join(b, r"Microsoft\Edge\Application\msedge.exe"),
+                ]
+    else:
+        c = [shutil.which(x) for x in ("google-chrome", "chromium", "microsoft-edge", "chromium-browser")]
+    for x in c:
+        if x and os.path.exists(x):
+            return x
+    return None
+
+
+def bring_title_to_front(title_substr, topmost=False):
+    if platform.system() != "Windows":
+        return
+    try:
+        user32 = ctypes.windll.user32
+        SW_RESTORE = 9
+        HWND_TOPMOST = -1
+        SWP_NOMOVE = 0x0002
+        SWP_NOSIZE = 0x0001
+        WNDENUMPROC = ctypes.WINFUNCTYPE(ctypes.c_bool, ctypes.c_void_p, ctypes.c_void_p)
+        for _ in range(16):
+            found = []
+            def cb(hwnd, _lp):
+                if user32.IsWindowVisible(hwnd):
+                    n = user32.GetWindowTextLengthW(hwnd)
+                    if n > 0:
+                        buf = ctypes.create_unicode_buffer(n + 1)
+                        user32.GetWindowTextW(hwnd, buf, n + 1)
+                        if title_substr in buf.value:
+                            if user32.IsIconic(hwnd):
+                                user32.ShowWindow(hwnd, SW_RESTORE)
+                            if topmost:
+                                user32.SetWindowPos(hwnd, HWND_TOPMOST, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE)
+                            user32.SetForegroundWindow(hwnd)
+                            found.append(hwnd)
+                            return False
+                return True
+            user32.EnumWindows(WNDENUMPROC(cb), 0)
+            if found:
+                return
+            time.sleep(0.2)
+    except Exception:
+        pass
+
+
+def open_popup_window(pid):
+    """فتح نافذة منبثقة صغيرة ومستقلة أمام المتصفح مباشرة (مثل IDM) لاختيار مكان الحفظ."""
+    url = f"http://127.0.0.1:{CURRENT_PORT}/popup?pid={pid}"
+    exe = _find_chromium_exe()
+    if not exe:
+        bring_window_to_front()
+        return False
+    profile_dir = APP / "app_profile"
+    profile_dir.mkdir(parents=True, exist_ok=True)
+    subprocess.Popen([
+        exe,
+        f"--app={url}",
+        f"--user-data-dir={profile_dir}",
+        "--no-first-run",
+        "--no-default-browser-check",
+        "--window-size=630,570",
+    ])
+    if platform.system() == "Windows":
+        threading.Thread(target=bring_title_to_front, args=("معلومات ملف التحميل", True), daemon=True).start()
+    return True
+
+
+def _send_magnet_to_running(uri, base_port=8765):
+    payload = json.dumps({"uri": uri, "inspect": True}).encode("utf-8")
+    for port in range(base_port, base_port + 30):
+        try:
+            req = rq.Request(
+                f"http://127.0.0.1:{port}/api/ext/torrent",
+                data=payload,
+                headers={"Content-Type": "application/json", "Origin": "chrome-extension://local"},
+            )
+            with rq.urlopen(req, timeout=2.5) as r:
+                if r.status == 200:
+                    return True
+        except Exception:
+            continue
+    return False
 
 def create_desktop_shortcut():
     """إنشاء اختصار لسطح المكتب في ويندوز بأيقونة الدولي للتحميلات (يدعم الأسماء والمسارات العربية 100%)."""
@@ -2207,6 +2328,8 @@ class Manager:
         self.install_msg = ""
         self.pending_video = None
         self.pending_download = None
+        self.pending_magnet = None
+        self.popups = {}
         self.aria2 = Aria2Engine(self)
         self.update_info = {
             "current": APP_VERSION,
@@ -2596,6 +2719,8 @@ class Manager:
         self.pending_video = None
         pd = self.pending_download
         self.pending_download = None
+        pm = self.pending_magnet
+        self.pending_magnet = None
         js_rts = list(detect_js_runtimes().keys())
         tors = self.aria2.list_items() if self.aria2.is_running() else []
         tor_spd = sum(t["speed"] for t in tors if t["status"] == "downloading")
@@ -2622,6 +2747,7 @@ class Manager:
             },
             "pending_video": pv,
             "pending_download": pd,
+            "pending_magnet": pm,
             "update": self.update_info,
         }
 
@@ -2712,6 +2838,25 @@ class Handler(BaseHTTPRequestHandler):
                     ]
                 }
                 self.send_any(200, manifest, "application/manifest+json; charset=utf-8")
+        elif clean_path == "/popup":
+            if self.guard(False):
+                qs = up.parse_qs(up.urlparse(self.path).query)
+                pid = (qs.get("pid") or [""])[0]
+                html = POPUP_PAGE.replace("__TOKEN__", TOKEN).replace("__PID__", pid)
+                self.send_any(200, html, "text/html; charset=utf-8")
+        elif clean_path == "/api/popup_data":
+            if self.guard():
+                qs = up.parse_qs(up.urlparse(self.path).query)
+                pid = (qs.get("pid") or [""])[0]
+                data = MGR.popups.get(pid)
+                if not data:
+                    self.send_any(404, {"error": "الطلب منتهي الصلاحية"})
+                else:
+                    self.send_any(200, {
+                        "url": data["url"],
+                        "headers": data.get("headers") or {},
+                        "settings": MGR.settings,
+                    })
         elif clean_path == "/api/state":
             if self.guard(): self.send_any(200, MGR.state())
         else:
@@ -2790,7 +2935,13 @@ class Handler(BaseHTTPRequestHandler):
             elif p == "/api/torrent/magnet":
                 r = MGR.aria2.add_magnet(d.get("uri", ""), d.get("dir"), bool(d.get("paused", False)))
             elif p == "/api/ext/torrent":
-                r = MGR.aria2.add_magnet(d.get("uri", ""))
+                uri = (d.get("uri") or "").strip()
+                if d.get("inspect", True):
+                    MGR.pending_magnet = uri
+                    threading.Thread(target=bring_window_to_front, daemon=True).start()
+                    r = {"ok": True, "inspect": True}
+                else:
+                    r = MGR.aria2.add_magnet(uri)
             elif p == "/api/torrent/file":
                 r = MGR.aria2.add_torrent_b64(
                     d.get("data", ""), d.get("dir"), d.get("select_files"),
@@ -2808,9 +2959,17 @@ class Handler(BaseHTTPRequestHandler):
             elif p == "/api/ext/add":
                 urls = [u.strip() for u in (d.get("urls") or []) if u and u.strip()]
                 if len(urls) == 1 and MGR.settings.get("confirm_dialog", True):
-                    MGR.pending_download = {"url": urls[0], "headers": d.get("headers") or {}}
-                    threading.Thread(target=bring_window_to_front, daemon=True).start()
-                    r = {"ok": True, "added": 1, "dialog": True}
+                    pid = secrets.token_hex(6)
+                    MGR.popups[pid] = {"url": urls[0], "headers": d.get("headers") or {}, "ts": time.time()}
+                    # تنظيف الطلبات القديمة
+                    for k in list(MGR.popups.keys()):
+                        if time.time() - MGR.popups[k]["ts"] > 600:
+                            MGR.popups.pop(k, None)
+                    opened = open_popup_window(pid)
+                    if not opened:
+                        MGR.pending_download = {"url": urls[0], "headers": d.get("headers") or {}}
+                        threading.Thread(target=bring_window_to_front, daemon=True).start()
+                    r = {"ok": True, "added": 1, "popup": opened}
                 else:
                     r = MGR.add(urls, d.get("headers"))
             elif p == "/api/ext/video":
@@ -2825,6 +2984,9 @@ class Handler(BaseHTTPRequestHandler):
             elif p == "/api/create_shortcut":
                 lnk = create_desktop_shortcut()
                 r = {"ok": True, "path": lnk}
+            elif p == "/api/register_magnet":
+                register_magnet_protocol()
+                r = {"ok": True}
             elif p == "/api/refresh_url": MGR.refresh_url(d["id"], d.get("url", ""), d.get("headers"))
             elif p == "/api/pause": MGR.pause(d["id"])
             elif p == "/api/resume": MGR.resume(d["id"])
@@ -2881,6 +3043,8 @@ def main():
     ap.add_argument("--port", type=int, default=8765)
     ap.add_argument("--no-window", action="store_true")
     ap.add_argument("--shortcut", action="store_true")
+    ap.add_argument("--register-magnet", action="store_true")
+    ap.add_argument("--magnet", type=str, default="")
     a = ap.parse_args()
     if a.shortcut:
         try:
@@ -2891,7 +3055,21 @@ def main():
         except Exception as e:
             print("Failed to create shortcut:", e)
             raise SystemExit(1)
-    MGR = Manager(); srv = None
+    if a.register_magnet:
+        try:
+            register_magnet_protocol()
+            print("Magnet protocol registered successfully!")
+            return
+        except Exception as e:
+            print("Failed to register magnet protocol:", e)
+            raise SystemExit(1)
+    if a.magnet:
+        if _send_magnet_to_running(a.magnet, a.port):
+            return
+    MGR = Manager()
+    if a.magnet:
+        MGR.pending_magnet = a.magnet
+    srv = None
     for port in range(a.port, a.port + 30):
         try: srv = ThreadingHTTPServer(("127.0.0.1", port), Handler); break
         except OSError: continue
@@ -3048,7 +3226,7 @@ textarea{min-height:120px;resize:vertical;direction:ltr;text-align:left}input.l{
 </style></head><body>
 <div class="app">
 <aside>
- <div class="brand"><img class="logo-img" src="/icon.png?v=3" alt="الدولي للتحميلات"><div><b>الدولي للتحميلات</b><small>الإصدار <span id="appVer">10.2</span></small></div></div>
+ <div class="brand"><img class="logo-img" src="/icon.png?v=3" alt="الدولي للتحميلات"><div><b>الدولي للتحميلات</b><small>الإصدار <span id="appVer">10.3</span></small></div></div>
  <button class="nav on" data-f="all"><span data-ic="all"></span>كل التنزيلات<em id="c-all">0</em></button>
  <button class="nav" data-f="active"><span data-ic="down"></span>قيد التنزيل<em id="c-active">0</em></button>
  <button class="nav" data-f="done"><span data-ic="ok"></span>المكتملة<em id="c-done">0</em></button>
@@ -3203,6 +3381,7 @@ textarea{min-height:120px;resize:vertical;direction:ltr;text-align:left}input.l{
  <div class="row">
   <button class="btn pri" id="okSet">حفظ</button>
   <button class="btn" id="bDeskSc">إنشاء اختصار على سطح المكتب</button>
+  <button class="btn" id="bRegMag">تعيين كبرنامج افتراضي للـ Magnet</button>
   <button class="btn" id="bChkUpd">التحقق من التحديثات</button>
   <button class="btn" data-close>إلغاء</button>
  </div></dialog>
@@ -3799,6 +3978,11 @@ async function tick(once){
    const pd=S.pending_download;
    openDownloadInfo(pd.url, pd.headers);
   }
+  if(S.pending_magnet){
+   const pm=S.pending_magnet;
+   setTab('torrent');
+   addMagnetUri(pm,false);
+  }
   render();
  }catch(e){}
  if(!once)setTimeout(tick,700);
@@ -3977,10 +4161,121 @@ $('#bDoUpd').onclick=async()=>{
   setTimeout(()=>location.reload(), 4000);
  }catch(e){toast(e.message)}
 };
+$('#bRegMag').onclick=async()=>{try{await api('/api/register_magnet',{});toast('تم تعيين الدولي للتحميلات كبرنامج افتراضي لروابط Magnet!')}catch(e){toast(e.message)}};
 $('#bDeskSc').onclick=async()=>{try{await api('/api/create_shortcut',{});toast('تم إنشاء اختصار «الدولي للتحميلات» على سطح المكتب!')}catch(e){toast(e.message)}};
 $('#bQuit').onclick=async()=>{try{await api('/api/quit',{})}catch(e){}$('#bye').style.display='grid'};
 tick();
 </script></body></html>'''
+
+
+POPUP_PAGE = r"""<!doctype html>
+<html lang="ar" dir="rtl"><head><meta charset="utf-8"><title>معلومات ملف التحميل — الدولي</title>
+<link rel="icon" type="image/png" sizes="256x256" href="/icon.png?v=3">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<style>
+:root{--bg:#eef0f3;--sf:#fff;--tx:#121b26;--mu:#667386;--ln:#dde2e8;--ac:#2447d6;--ac2:#e6ebfc;--er:#cf3a3a;color-scheme:light dark}
+@media(prefers-color-scheme:dark){:root{--bg:#0d1218;--sf:#151c24;--tx:#e7ecf2;--mu:#8995a6;--ln:#252f3b;--ac:#7c9bff;--ac2:#1b2748;--er:#ff7878}}
+*{box-sizing:border-box}
+body{margin:0;padding:18px;background:var(--sf);color:var(--tx);font:14.5px/1.55 "SF Arabic","Segoe UI",Tahoma,system-ui,sans-serif}
+button,input,select{font:inherit;color:inherit}
+h2{margin:0 0 12px;font-size:18px;display:flex;align-items:center;gap:10px}
+h2 img{width:28px;height:28px;border-radius:7px}
+.fgrid{display:grid;grid-template-columns:1fr 96px;gap:14px;align-items:start}
+.fbox{display:flex;flex-direction:column;align-items:center;justify-content:center;gap:6px;padding:14px 8px;border-radius:12px;background:var(--bg);border:1px solid var(--ln);text-align:center}
+.fi{width:54px;height:54px;border-radius:12px;display:grid;place-items:center;font-size:13px;font-weight:700;direction:ltr;color:var(--c);background:color-mix(in srgb,var(--c) 15%,transparent)}
+label{display:block;font-size:12.5px;color:var(--mu);margin:10px 0 4px}
+input,select{width:100%;border:1px solid var(--ln);background:var(--bg);border-radius:10px;padding:8px 11px}
+input.l{direction:ltr;text-align:left}
+.inrow{display:flex;gap:6px;align-items:center}.inrow input{flex:1}
+.ucheck{display:flex;align-items:center;gap:8px;padding:6px 10px;border:1px solid var(--ln);background:var(--bg);border-radius:10px;cursor:pointer;font-size:12.5px;margin-top:8px}
+.ucheck input{width:auto;margin:0}
+.btn{display:inline-flex;align-items:center;justify-content:center;gap:6px;border:1px solid var(--ln);background:var(--bg);border-radius:10px;padding:8px 16px;cursor:pointer}
+.btn:hover{border-color:var(--ac)}
+.btn.pri{background:var(--ac);border-color:var(--ac);color:#fff;font-weight:600}
+@media(prefers-color-scheme:dark){.btn.pri{color:#0b1020}}
+.row{display:flex;gap:8px;margin-top:16px;flex-wrap:wrap}
+#err{color:var(--er);font-size:13px;margin-top:8px;min-height:18px}
+</style></head><body>
+<h2><img src="/icon.png?v=3" alt="">معلومات ملف التحميل</h2>
+<div class="fgrid">
+ <div>
+  <label for="iUrl" style="margin-top:0">الرابط (URL)</label>
+  <input class="l" id="iUrl" readonly>
+  <label for="iCat">الفئة</label>
+  <select id="iCat">
+   <option value="عام">عام</option>
+   <option value="مستندات">مستندات (PDF / Office)</option>
+   <option value="مضغوط">ملفات مضغوطة (ZIP / RAR)</option>
+   <option value="فيديو">فيديو</option>
+   <option value="صوت">صوت</option>
+   <option value="برامج">برامج (EXE / MSI)</option>
+   <option value="صور">صور</option>
+  </select>
+  <label for="iDir">مجلد الحفظ</label>
+  <div class="inrow">
+   <input class="l" id="iDir">
+   <button class="btn" id="iBrowse" type="button" title="اختيار مجلد">...</button>
+  </div>
+  <label class="ucheck"><input type="checkbox" id="iRemCat"><span id="iRemTxt">تذكر هذا المسار لهذه الفئة</span></label>
+  <label for="iName">اسم الملف</label>
+  <input id="iName" dir="auto">
+  <label for="iDesc">الوصف (اختياري)</label>
+  <input id="iDesc" placeholder="ملاحظة عن الملف...">
+ </div>
+ <div class="fbox">
+  <div class="fi" id="iIcon" style="--c:#2447d6">FILE</div>
+  <b id="iSize" style="font-size:13px">جارٍ الفحص...</b>
+  <small id="iExt" style="font-size:12px;color:var(--mu)"></small>
+ </div>
+</div>
+<div id="err"></div>
+<div class="row">
+ <button class="btn pri" id="iStart">بدء التحميل</button>
+ <button class="btn" id="iLater">التحميل لاحقًا</button>
+ <button class="btn" id="iCancel">إلغاء الأمر</button>
+</div>
+<script>
+const T="__TOKEN__",PID="__PID__",$=s=>document.querySelector(s);
+const api=async(p,b)=>{const r=await fetch(p,{method:b===undefined?'GET':'POST',headers:{'X-Token':T,'Content-Type':'application/json'},body:b===undefined?undefined:JSON.stringify(b)});const j=await r.json().catch(()=>({}));if(!r.ok)throw new Error(j.error||'حدث خطأ');return j};
+const B=n=>{if(n<0||n===undefined||n===null)return'—';const u=['بايت','ك.ب','م.ب','ج.ب','ت.ب'];let i=0;while(n>=1024&&i<4){n/=1024;i++}return(i?n.toFixed(n<10?2:1):Math.round(n))+' '+u[i]};
+const CAT=[['#d98a00','zip rar 7z tar gz bz2 xz iso'],['#d6336c','mp4 mkv avi mov webm flv'],['#8f4fe0','mp3 flac wav aac ogg m4a'],['#1c9a5a','jpg jpeg png gif webp svg bmp'],['#2447d6','pdf doc docx xls xlsx ppt pptx txt epub'],['#0d9488','exe msi dmg pkg apk deb']];
+const col=e=>(CAT.find(c=>c[1].split(' ').includes(e))||['#667386'])[0];
+const CMAP=[['مضغوط',['zip','rar','7z','tar','gz','bz2','xz','iso']],['فيديو',['mp4','mkv','avi','mov','webm','flv','m4v']],['صوت',['mp3','flac','wav','aac','ogg','m4a']],['صور',['jpg','jpeg','png','gif','webp','svg','bmp']],['مستندات',['pdf','doc','docx','xls','xlsx','ppt','pptx','txt','epub']],['برامج',['exe','msi','dmg','pkg','apk','deb']]];
+const guessCat=fn=>{const x=(fn&&fn.includes('.')?fn.split('.').pop().toLowerCase():'');const f=CMAP.find(c=>c[1].includes(x));return f?f[0]:'عام'};
+let hdrs={},cfg={};
+function setIc(fn){const x=(fn&&fn.includes('.')?fn.split('.').pop().toLowerCase():'');$('#iIcon').style.setProperty('--c',col(x));$('#iIcon').textContent=(x||'FILE').slice(0,4).toUpperCase();$('#iExt').textContent=x?x.toUpperCase():''}
+function applyCat(c){const d=(cfg.category_dirs||{})[c]||cfg.dir||'';$('#iDir').value=d;$('#iRemTxt').textContent=`تذكر هذا المسار لفئة «${c}»`}
+$('#iCat').onchange=()=>applyCat($('#iCat').value);
+$('#iName').oninput=()=>setIc($('#iName').value);
+$('#iBrowse').onclick=async()=>{try{const r=await api('/api/browse_dir',{initial:$('#iDir').value});if(r.dir)$('#iDir').value=r.dir}catch(e){$('#err').textContent=e.message}};
+$('#iCancel').onclick=()=>window.close();
+const go=async(startNow)=>{
+ try{
+  await api('/api/add_single',{
+   url:$('#iUrl').value.trim(),dir:$('#iDir').value.trim(),filename:$('#iName').value.trim(),
+   headers:hdrs,start_now:startNow,category:$('#iCat').value,
+   remember_cat:$('#iRemCat').checked,desc:$('#iDesc').value.trim()
+  });
+  window.close();
+ }catch(e){$('#err').textContent=e.message}
+};
+$('#iStart').onclick=()=>go(true);
+$('#iLater').onclick=()=>go(false);
+(async()=>{
+ try{
+  const d=await api('/api/popup_data?pid='+encodeURIComponent(PID));
+  hdrs=d.headers||{};cfg=d.settings||{};
+  $('#iUrl').value=d.url;
+  const n0=decodeURIComponent((d.url.split('?')[0].split('/').pop()||'download')).slice(0,180);
+  $('#iName').value=n0;setIc(n0);
+  const c0=guessCat(n0);$('#iCat').value=c0;applyCat(c0);
+  const info=await api('/api/probe_direct',{url:d.url,headers:hdrs});
+  if(info.filename){$('#iName').value=info.filename;setIc(info.filename);const c1=guessCat(info.filename);$('#iCat').value=c1;applyCat(c1)}
+  if(info.warning){$('#err').textContent=info.warning;$('#iSize').textContent='تنبيه'}
+  else{$('#iSize').textContent=info.size>0?B(info.size):'حجم غير معروف'}
+ }catch(e){$('#err').textContent=e.message}
+})();
+</script></body></html>"""
 
 if __name__ == "__main__":
     main()
