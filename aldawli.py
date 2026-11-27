@@ -12,7 +12,7 @@ from http.server import ThreadingHTTPServer, BaseHTTPRequestHandler
 from pathlib import Path
 
 APP_TITLE = "الدولي للتحميلات"
-APP_VERSION = "10.21"
+APP_VERSION = "10.22"
 UPDATE_REPO = "momenhijazi0-debug/AlDawli-Downloads"
 UPDATE_MANIFEST_URL = f"https://raw.githubusercontent.com/{UPDATE_REPO}/main/version.json"
 UPDATE_SCRIPT_URL = f"https://raw.githubusercontent.com/{UPDATE_REPO}/main/aldawli.py"
@@ -3440,18 +3440,20 @@ class Manager:
 
                 self.update_info["msg"] = "تم التحديث بنجاح! جارٍ إعادة التشغيل..."
 
-                # إغلاق المحركات وحفظ الحالة ثم إعادة تشغيل السكربت تلقائيًا
+                # إغلاق المحركات وحفظ الحالة وفك القفل ثم إعادة تشغيل السكربت تلقائيًا
                 self.shutdown()
+                _release_single_instance_mutex()
                 creationflags = getattr(subprocess, "CREATE_NO_WINDOW", 0) if platform.system() == "Windows" else 0
+                extra_args = [] if _WV.get("main") is not None else ["--no-window"]
                 if getattr(sys, "frozen", False):
                     subprocess.Popen(
-                        [sys.executable, "--port", str(CURRENT_PORT), "--no-window"],
+                        [sys.executable, "--port", str(CURRENT_PORT)] + extra_args,
                         cwd=str(app_dir()),
                         creationflags=creationflags,
                     )
                 else:
                     subprocess.Popen(
-                        [sys.executable, str(target), "--port", str(CURRENT_PORT), "--no-window"],
+                        [sys.executable, str(target), "--port", str(CURRENT_PORT)] + extra_args,
                         cwd=str(target.parent),
                         creationflags=creationflags,
                     )
@@ -3866,7 +3868,37 @@ def open_window(url):
         threading.Thread(target=apply_windows_taskbar_icon, daemon=True).start()
 
 
+_MUTEX_HANDLE = None
+
+
+def _acquire_single_instance_mutex():
+    global _MUTEX_HANDLE
+    if platform.system() != "Windows":
+        return True
+    try:
+        kernel32 = ctypes.windll.kernel32
+        handle = kernel32.CreateMutexW(None, False, "Local\\AlDawliDownloads_SingleInstance_v1")
+        if handle and kernel32.GetLastError() == 183:  # ERROR_ALREADY_EXISTS
+            kernel32.CloseHandle(handle)
+            return False
+        _MUTEX_HANDLE = handle
+        return True
+    except Exception:
+        return True
+
+
+def _release_single_instance_mutex():
+    global _MUTEX_HANDLE
+    if _MUTEX_HANDLE and platform.system() == "Windows":
+        try:
+            ctypes.windll.kernel32.CloseHandle(_MUTEX_HANDLE)
+        except Exception:
+            pass
+        _MUTEX_HANDLE = None
+
+
 def _try_focus_running_instance(base_port=8765):
+    opener = rq.build_opener(rq.ProxyHandler({}))
     for port in range(base_port, base_port + 30):
         try:
             req = rq.Request(
@@ -3874,7 +3906,7 @@ def _try_focus_running_instance(base_port=8765):
                 data=b"{}",
                 headers={"Content-Type": "application/json", "Host": f"127.0.0.1:{port}"},
             )
-            with rq.urlopen(req, timeout=1.2) as r:
+            with opener.open(req, timeout=1.2) as r:
                 if r.status == 200:
                     return True
         except Exception:
@@ -4084,9 +4116,10 @@ def main():
     if a.magnet:
         if _send_magnet_to_running(a.magnet, a.port):
             return
-    elif not a.no_window:
-        if _try_focus_running_instance(a.port):
-            return
+    if not _acquire_single_instance_mutex():
+        if not a.no_window:
+            _try_focus_running_instance(a.port)
+        return
     set_windows_app_id()
     MGR = Manager()
     if a.magnet:
@@ -4277,7 +4310,7 @@ textarea{min-height:120px;resize:vertical;direction:ltr;text-align:left}input.l{
 </style></head><body>
 <div class="app">
 <aside>
- <div class="brand"><img class="logo-img" src="/icon.png?v=3" alt="الدولي للتحميلات"><div><b>الدولي للتحميلات</b><small>الإصدار <span id="appVer">10.20</span></small></div></div>
+ <div class="brand"><img class="logo-img" src="/icon.png?v=3" alt="الدولي للتحميلات"><div><b>الدولي للتحميلات</b><small>الإصدار <span id="appVer">10.22</span></small></div></div>
  <button class="nav" data-f="video"><span data-ic="video"></span>تحميل فيديو</button>
  <button class="nav" data-f="upload"><span data-ic="upload"></span>مركز الرفع<em id="c-upload">0</em></button>
  <button class="nav" data-f="torrent"><span data-ic="magnet"></span>التورنت<em id="c-torrent">0</em></button>

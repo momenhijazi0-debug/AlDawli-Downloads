@@ -1,5 +1,5 @@
 {
-  "version": "10.20",
-  "notes": "إضافة تبويب وقائمة «قياس السرعة» لقياس الـ Ping وسرعة التنزيل والرفع الفعلية مباشرة من التطبيق.",
+  "version": "10.22",
+  "notes": "منع فتح أكثر من نسخة من البرنامج أو تكرار أيقونة صينية النظام نهائياً، مع إعادة فتح النافذة تلقائياً بعد التحديث.",
   "url": "https://raw.githubusercontent.com/momenhijazi0-debug/AlDawli-Downloads/main/aldawli.py"
 }
