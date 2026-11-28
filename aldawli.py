@@ -12,7 +12,7 @@ from http.server import ThreadingHTTPServer, BaseHTTPRequestHandler
 from pathlib import Path
 
 APP_TITLE = "الدولي للتحميلات"
-APP_VERSION = "10.26"
+APP_VERSION = "10.27"
 UPDATE_REPO = "momenhijazi0-debug/AlDawli-Downloads"
 UPDATE_MANIFEST_URL = f"https://raw.githubusercontent.com/{UPDATE_REPO}/main/version.json"
 UPDATE_SCRIPT_URL = f"https://raw.githubusercontent.com/{UPDATE_REPO}/main/aldawli.py"
@@ -75,6 +75,7 @@ def app_dir():
 
 # ====================== جسر التواصل مع Tauri 2 ======================
 TAURI_MODE = os.environ.get("ALDAWLI_TAURI_MODE") == "1"
+PARENT_PID = 0
 _TAURI_STDOUT_LOCK = threading.Lock()
 
 
@@ -992,6 +993,41 @@ def open_video_popup_window(vid):
     if platform.system() == "Windows":
         threading.Thread(target=bring_title_to_front, args=("تحميل فيديو — الدولي", True), daemon=True).start()
     return True
+
+
+def close_popup_windows_os(title_substr):
+    """إغلاق نافذة التحميل المنبثقة بشكل مضمون عبر نظام ويندوز (WM_CLOSE) عند الضغط على بدء التحميل أو إلغاء."""
+    if platform.system() != "Windows" or not title_substr:
+        return False
+    try:
+        user32 = ctypes.windll.user32
+        WM_CLOSE = 0x0010
+        WNDENUMPROC = ctypes.WINFUNCTYPE(ctypes.c_bool, ctypes.c_void_p, ctypes.c_void_p)
+        matched_parent = []
+        matched_any = []
+
+        def cb(hwnd, _lp):
+            if user32.IsWindowVisible(hwnd):
+                n = user32.GetWindowTextLengthW(hwnd)
+                if n > 0:
+                    buf = ctypes.create_unicode_buffer(n + 1)
+                    user32.GetWindowTextW(hwnd, buf, n + 1)
+                    if title_substr in buf.value:
+                        pid = ctypes.c_ulong(0)
+                        user32.GetWindowThreadProcessId(hwnd, ctypes.byref(pid))
+                        if PARENT_PID and pid.value == PARENT_PID:
+                            matched_parent.append(hwnd)
+                        else:
+                            matched_any.append(hwnd)
+            return True
+
+        user32.EnumWindows(WNDENUMPROC(cb), 0)
+        targets = matched_parent if matched_parent else matched_any
+        for hwnd in targets:
+            user32.PostMessageW(hwnd, WM_CLOSE, 0, 0)
+        return bool(targets)
+    except Exception:
+        return False
 
 
 def _send_magnet_to_running(uri, base_port=8765):
@@ -3263,6 +3299,7 @@ class Manager:
         self.pending_video = None
         self.pending_download = None
         self.pending_magnet = None
+        self.pending_tab = None
         self.ext_last_seen = 0.0
         self.popups = {}
         self.vpopups = {}
@@ -3664,6 +3701,14 @@ class Manager:
                 dl_url = str(data.get("url") or UPDATE_SCRIPT_URL).strip()
                 setup_url = str(data.get("setup_url") or UPDATE_SETUP_URL).strip()
                 full_setup = bool(data.get("full_setup", False))
+                remote_online_ep = str(data.get("online_endpoint") or "").strip()
+                remote_online_key = str(data.get("online_api_key") or "").strip()
+                if remote_online_ep and remote_online_ep != self.settings.get("online_endpoint", ""):
+                    self.settings["online_endpoint"] = remote_online_ep
+                    if remote_online_key:
+                        self.settings["online_api_key"] = remote_online_key
+                    self.save()
+                    threading.Thread(target=_fetch_online_users_count, daemon=True).start()
                 avail = _ver_tuple(latest) > _ver_tuple(APP_VERSION)
                 self.update_info.update({
                     "latest": latest,
@@ -3827,6 +3872,8 @@ class Manager:
         self.pending_download = None
         pm = self.pending_magnet
         self.pending_magnet = None
+        pt = self.pending_tab
+        self.pending_tab = None
         js_rts = list(detect_js_runtimes().keys())
         tors = self.aria2.list_items() if self.aria2.is_running() else []
         tor_spd = sum(t["speed"] for t in tors if t["status"] == "downloading")
@@ -3855,6 +3902,7 @@ class Manager:
             "pending_video": pv,
             "pending_download": pd,
             "pending_magnet": pm,
+            "pending_tab": pt,
             "update": self.update_info,
             "online_users": get_online_users_info(),
             "ext_status": {
@@ -3874,6 +3922,7 @@ class Manager:
     def shutdown(self):
         for i in list(self.items.values()): i.stop.set()
         for u in list(self.uploads.values()): u.cancel()
+        _presence_leave()
         self.aria2.shutdown()
         time.sleep(0.3); self.save()
 
@@ -4156,6 +4205,31 @@ class Handler(BaseHTTPRequestHandler):
             elif p == "/api/pause_all": [MGR.pause(i) for i in list(MGR.items)]
             elif p == "/api/resume_all": [MGR.resume(i) for i in list(MGR.items)]
             elif p == "/api/remove": MGR.remove(d["id"], bool(d.get("delete_file")))
+            elif p == "/api/remove_bulk":
+                ids = d.get("ids") or []
+                del_f = bool(d.get("delete_file"))
+                cnt = 0
+                for i in ids:
+                    if i in MGR.items:
+                        MGR.remove(i, del_f)
+                        cnt += 1
+                r = {"ok": True, "removed": cnt}
+            elif p == "/api/popup/close":
+                kind = str(d.get("kind") or "download").lower()
+                show_m = bool(d.get("show_main", False))
+                tab = str(d.get("tab") or "").strip()
+                if tab in ("all", "active", "stopped", "video", "upload", "torrent"):
+                    MGR.pending_tab = tab
+                if show_m:
+                    threading.Thread(target=show_or_open_main_window, daemon=True).start()
+                title_sub = "تحميل فيديو — الدولي" if kind == "video" else "معلومات ملف التحميل"
+                def _close_later():
+                    time.sleep(0.08)
+                    close_popup_windows_os(title_sub)
+                    time.sleep(0.28)
+                    close_popup_windows_os(title_sub)
+                threading.Thread(target=_close_later, daemon=True).start()
+                r = {"ok": True}
             elif p == "/api/clear_done":
                 [MGR.remove(i) for i, it in list(MGR.items.items()) if it.status == "completed"]
             elif p == "/api/open": open_path(MGR.items[d["id"]], d.get("what", "folder"))
@@ -4468,8 +4542,8 @@ def get_speedtest_status():
 
 
 # ====================== عداد المستخدمين المتصلين حالياً ======================
-ONLINE_USERS_ENDPOINT = ""   # اختياري: ضع رابط Supabase REST أو Firebase RTDB هنا لتفعيل العداد السحابي المشترك
-ONLINE_USERS_API_KEY = ""    # اختياري: مفتاح anon key لـ Supabase أو يترك فارغًا لـ Firebase/مخصص
+ONLINE_USERS_ENDPOINT = ""   # اختياري: ضع رابط Firebase RTDB أو Supabase REST هنا (أو داخل version.json في حقل online_endpoint)
+ONLINE_USERS_API_KEY = ""    # اختياري: مفتاح anon key لـ Supabase أو يترك فارغًا لـ Firebase
 ONLINE_USERS_TABLE = "aldawli_online"
 
 _PRESENCE_LOCK = threading.Lock()
@@ -4481,10 +4555,36 @@ _PRESENCE_STATE = {
 }
 
 
+def _active_online_endpoint():
+    ep = (ONLINE_USERS_ENDPOINT or "").strip()
+    key = (ONLINE_USERS_API_KEY or "").strip()
+    if not ep and MGR is not None:
+        ep = str(MGR.settings.get("online_endpoint") or "").strip()
+        if not key:
+            key = str(MGR.settings.get("online_api_key") or "").strip()
+    return ep.rstrip("/"), key
+
+
+def _presence_leave():
+    ep, _ = _active_online_endpoint()
+    if not ep:
+        return
+    sid = _PRESENCE_STATE["session_id"]
+    if "firebaseio.com" in ep or "firebasedatabase.app" in ep:
+        try:
+            ctx = ssl.create_default_context()
+            del_url = f"{ep}/presence/{sid}.json"
+            req = rq.Request(del_url, method="DELETE", headers={"User-Agent": UA})
+            with rq.urlopen(req, timeout=1.5, context=ctx) as r:
+                r.read()
+        except Exception:
+            pass
+
+
 def _fetch_online_users_count():
     sid = _PRESENCE_STATE["session_id"]
     now_ts = int(time.time())
-    ep = (ONLINE_USERS_ENDPOINT or "").strip().rstrip("/")
+    ep, api_key = _active_online_endpoint()
     if not ep:
         with _PRESENCE_LOCK:
             _PRESENCE_STATE["online_count"] = 1
@@ -4495,19 +4595,31 @@ def _fetch_online_users_count():
     try:
         ctx = ssl.create_default_context()
         if "firebaseio.com" in ep or "firebasedatabase.app" in ep:
-            # Firebase Realtime Database REST
+            # Firebase Realtime Database REST باستخدام توقيت السيرفر لتفادي اختلاف ساعة الأجهزة
             put_url = f"{ep}/presence/{sid}.json"
-            body = json.dumps({"ts": now_ts, "v": APP_VERSION}).encode("utf-8")
+            body = json.dumps({"ts": {".sv": "timestamp"}, "v": APP_VERSION}).encode("utf-8")
             req = rq.Request(put_url, data=body, method="PUT", headers={"Content-Type": "application/json", "User-Agent": UA})
             with rq.urlopen(req, timeout=6, context=ctx) as r:
-                r.read()
+                put_resp = json.loads(r.read().decode("utf-8", errors="replace") or "{}")
+            ref_ms = int(put_resp.get("ts") or 0) if isinstance(put_resp, dict) else 0
             get_url = f"{ep}/presence.json"
             with rq.urlopen(rq.Request(get_url, headers={"User-Agent": UA}), timeout=6, context=ctx) as r:
                 data = json.loads(r.read().decode("utf-8", errors="replace") or "{}")
             active = 0
             if isinstance(data, dict):
-                for k, v in data.items():
-                    if isinstance(v, dict) and (now_ts - int(v.get("ts", 0) or 0)) <= 95:
+                if ref_ms <= 0 and isinstance(data.get(sid), dict):
+                    ref_ms = int(data[sid].get("ts") or 0)
+                if ref_ms <= 0:
+                    ref_ms = now_ts * 1000
+                for _k, v in data.items():
+                    if not isinstance(v, dict):
+                        continue
+                    vts = int(v.get("ts", 0) or 0)
+                    if vts <= 0:
+                        continue
+                    # توحيد الوحدات (ثوانٍ أو ملي ثانية)
+                    v_ms = vts if vts > 10_000_000_000 else vts * 1000
+                    if abs(ref_ms - v_ms) <= 95_000:
                         active += 1
             count = max(1, active)
         else:
@@ -4518,9 +4630,9 @@ def _fetch_online_users_count():
                 "User-Agent": UA,
                 "Prefer": "resolution=merge-duplicates",
             }
-            if ONLINE_USERS_API_KEY:
-                headers["apikey"] = ONLINE_USERS_API_KEY
-                headers["Authorization"] = f"Bearer {ONLINE_USERS_API_KEY}"
+            if api_key:
+                headers["apikey"] = api_key
+                headers["Authorization"] = f"Bearer {api_key}"
             row = json.dumps({"session_id": sid, "last_seen": now_ts, "version": APP_VERSION}).encode("utf-8")
             req = rq.Request(tbl_url, data=row, method="POST", headers=headers)
             with rq.urlopen(req, timeout=6, context=ctx) as r:
@@ -4528,9 +4640,9 @@ def _fetch_online_users_count():
             cutoff = now_ts - 95
             q_url = f"{tbl_url}?last_seen=gte.{cutoff}&select=session_id"
             q_headers = {"User-Agent": UA}
-            if ONLINE_USERS_API_KEY:
-                q_headers["apikey"] = ONLINE_USERS_API_KEY
-                q_headers["Authorization"] = f"Bearer {ONLINE_USERS_API_KEY}"
+            if api_key:
+                q_headers["apikey"] = api_key
+                q_headers["Authorization"] = f"Bearer {api_key}"
             with rq.urlopen(rq.Request(q_url, headers=q_headers), timeout=6, context=ctx) as r:
                 rows = json.loads(r.read().decode("utf-8", errors="replace") or "[]")
             count = max(1, len(rows) if isinstance(rows, list) else 1)
@@ -4550,7 +4662,7 @@ def _start_presence_heartbeat():
     def _loop():
         _fetch_online_users_count()
         while True:
-            time.sleep(35)
+            time.sleep(30)
             try:
                 _fetch_online_users_count()
             except Exception:
@@ -4567,7 +4679,7 @@ def get_online_users_info():
 
 
 def main():
-    global MGR, TAURI_MODE, CURRENT_PORT
+    global MGR, TAURI_MODE, CURRENT_PORT, PARENT_PID
     ap = argparse.ArgumentParser()
     ap.add_argument("--port", type=int, default=8765)
     ap.add_argument("--no-window", action="store_true")
@@ -4580,6 +4692,8 @@ def main():
     a = ap.parse_args()
     if a.tauri:
         TAURI_MODE = True
+    if a.parent_pid:
+        PARENT_PID = int(a.parent_pid)
     if a.shortcut:
         try:
             lnk = create_desktop_shortcut()
@@ -4827,7 +4941,7 @@ textarea{min-height:120px;resize:vertical;direction:ltr;text-align:left}input.l{
 </style></head><body>
 <div class="app">
 <aside>
- <div class="brand"><img class="logo-img" src="/icon.png?v=3" alt="الدولي للتحميلات"><div><b>الدولي للتحميلات</b><small>الإصدار <span id="appVer">10.26</span></small></div></div>
+ <div class="brand"><img class="logo-img" src="/icon.png?v=3" alt="الدولي للتحميلات"><div><b>الدولي للتحميلات</b><small>الإصدار <span id="appVer">10.27</span></small></div></div>
  <button class="nav" data-f="video"><span data-ic="video"></span>تحميل فيديو</button>
  <button class="nav" data-f="upload"><span data-ic="upload"></span>مركز الرفع<em id="c-upload">0</em></button>
  <button class="nav" data-f="torrent"><span data-ic="magnet"></span>التورنت<em id="c-torrent">0</em></button>
@@ -4846,6 +4960,7 @@ textarea{min-height:120px;resize:vertical;direction:ltr;text-align:left}input.l{
 </aside>
 <main>
  <header><h1 id="ttl">كل التنزيلات</h1>
+  <button class="btn dng" id="bBulkDel" title="حذف تنزيلات محددة أو حذف الكل"><span data-ic="trash"></span>حذف</button>
   <button class="btn pri" id="bAdd"><span data-ic="plus"></span>إضافة رابط</button></header>
  <div id="updBar"><div style="flex:1"><b id="updTtl">يتوفر تحديث جديد!</b><small id="updNotes"></small></div><button class="btn pri" id="bDoUpd">تحديث وإعادة التشغيل الآن</button></div>
  <div id="extBar" style="margin:8px 24px 0;padding:11px 16px;border-radius:12px;background:color-mix(in srgb,#d98a00 14%,var(--sf));border:1px solid #d98a00;display:none;align-items:center;gap:12px;flex-wrap:wrap"><div style="flex:1"><b style="color:#d98a00;font-size:14px">تم تحديث ملفات إضافة المتصفح (aldawli-ext) تلقائيًا!</b><small style="color:var(--tx);font-size:13px;display:block">افتح صفحة الإضافات في متصفحك (edge://extensions أو chrome://extensions) واضغط زر التحديث (↻) على إضافة الدولي لتفعيل التحديث الجديد.</small></div><button class="btn" id="bDisExt">فهمت، إخفاء</button></div>
@@ -5020,6 +5135,24 @@ textarea{min-height:120px;resize:vertical;direction:ltr;text-align:left}input.l{
 
 <dialog id="dDel"><h3>إزالة التنزيل</h3><p>هل تريد حذف الملف من جهازك أيضًا؟</p>
  <div class="row"><button class="btn" data-del="0">إزالة من القائمة فقط</button><button class="btn dng" data-del="1">حذف مع الملف</button><button class="btn" data-close>تراجع</button></div></dialog>
+
+<dialog id="dBulkDel" style="width:min(620px,94vw)">
+ <h3>حذف التنزيلات</h3>
+ <p style="margin:0 0 8px;color:var(--mu);font-size:13.5px">اختر التنزيلات التي تريد حذفها ثم اضغط «تأكيد الحذف»:</p>
+ <div class="tbar" style="margin-top:6px">
+  <button class="btn" id="bdAll" type="button" style="padding:6px 11px;font-size:12.5px">تحديد الكل</button>
+  <button class="btn" id="bdNone" type="button" style="padding:6px 11px;font-size:12.5px">إلغاء التحديد</button>
+  <button class="btn" id="bdDone" type="button" style="padding:6px 11px;font-size:12.5px">المكتملة فقط</button>
+  <button class="btn" id="bdStop" type="button" style="padding:6px 11px;font-size:12.5px">المتوقفة والفاشلة</button>
+  <span id="bdStats" style="margin-inline-start:auto;font-size:12.5px;font-weight:600;color:var(--tx)"></span>
+ </div>
+ <div class="tfiles" id="bdList" style="max-height:290px"></div>
+ <label class="ucheck" style="margin-top:12px"><input type="checkbox" id="bdDelFiles"><span>حذف الملفات المكتملة من جهازك أيضًا (وليس من القائمة فقط)</span></label>
+ <div class="row">
+  <button class="btn dng" id="okBulkDel" type="button" style="font-weight:600"><span data-ic="trash"></span>تأكيد الحذف</button>
+  <button class="btn" type="button" data-close>إلغاء</button>
+ </div>
+</dialog>
 
 <dialog id="dInfo" style="width:min(600px,94vw)">
  <h3>معلومات ملف التحميل</h3>
@@ -5196,6 +5329,8 @@ function setTab(name){
  flt=name;
  document.querySelectorAll('.nav[data-f]').forEach(x=>x.classList.toggle('on',x.dataset.f===name));
  const isV=name==='video',isU=name==='upload',isT=name==='torrent',isS=name==='soon',isSt=name==='speedtest';
+ $('#bAdd').classList.toggle('hid',name==='active'||name==='stopped');
+ $('#bBulkDel').classList.toggle('hid',name!=='all');
  $('#videoView').style.display=isV?'flex':'none';
  $('#uploadView').style.display=isU?'flex':'none';
  $('#torrentView').style.display=isT?'flex':'none';
@@ -5678,6 +5813,9 @@ async function tick(once){
    setTab('torrent');
    addMagnetUri(pm,false);
   }
+  if(S.pending_tab){
+   setTab(S.pending_tab);
+  }
   render();
  }catch(e){}
  if(!once)setTimeout(tick,700);
@@ -5834,6 +5972,43 @@ function openAdd(t){
  $('#urls').value=t||'';$('#dAdd').showModal();$('#urls').focus();
 }
 $('#bAdd').onclick=()=>openAdd();
+function updateBulkStats(){
+ const cbs=[...$('#bdList').querySelectorAll('input[type=checkbox]')];
+ const sel=cbs.filter(c=>c.checked).length;
+ $('#bdStats').textContent=`المحدد للحذف: ${sel} من ${cbs.length}`;
+ $('#okBulkDel').disabled=!sel;
+ $('#okBulkDel').innerHTML=sv(I.trash)+(sel?`تأكيد الحذف (${sel})`:'تأكيد الحذف');
+}
+$('#bBulkDel').onclick=()=>{
+ const items=S.items||[];
+ if(!items.length){toast('لا توجد تنزيلات لحذفها');return}
+ $('#bdDelFiles').checked=false;
+ $('#bdList').innerHTML=items.map(it=>`
+  <label class="tfile" data-st="${esc(it.status)}">
+   <input type="checkbox" checked data-id="${esc(it.id)}">
+   <span class="tfn" title="${esc(it.filename)}">${esc(it.filename)}</span>
+   <span class="tfs">${esc(ST[it.status]||it.status)} • ${it.size>0?B(it.size):B(it.downloaded)}</span>
+  </label>`).join('');
+ updateBulkStats();
+ $('#dBulkDel').showModal();
+};
+$('#bdList').onchange=updateBulkStats;
+$('#bdAll').onclick=()=>{$('#bdList').querySelectorAll('input[type=checkbox]').forEach(c=>c.checked=true);updateBulkStats()};
+$('#bdNone').onclick=()=>{$('#bdList').querySelectorAll('input[type=checkbox]').forEach(c=>c.checked=false);updateBulkStats()};
+$('#bdDone').onclick=()=>{$('#bdList').querySelectorAll('.tfile').forEach(r=>{r.querySelector('input').checked=(r.dataset.st==='completed')});updateBulkStats()};
+$('#bdStop').onclick=()=>{$('#bdList').querySelectorAll('.tfile').forEach(r=>{r.querySelector('input').checked=(r.dataset.st==='paused'||r.dataset.st==='error')});updateBulkStats()};
+$('#okBulkDel').onclick=async()=>{
+ const ids=[...$('#bdList').querySelectorAll('input[type=checkbox]:checked')].map(c=>c.dataset.id);
+ if(!ids.length){toast('اختر تنزيلًا واحدًا على الأقل للحذف');return}
+ const delFiles=$('#bdDelFiles').checked;
+ $('#okBulkDel').disabled=true;
+ try{
+  const r=await api('/api/remove_bulk',{ids,delete_file:delFiles});
+  $('#dBulkDel').close();
+  toast(`تم حذف ${r.removed} عنصر بنجاح`);
+  tick(true);
+ }catch(e){toast(e.message);$('#okBulkDel').disabled=false}
+};
 $('#bPaste').onclick=async()=>{try{$('#urls').value=(await navigator.clipboard.readText()).trim()}catch(e){toast('تعذّر قراءة الحافظة، الصق الرابط يدويًا')}};
 $('#okAdd').onclick=async()=>{
  const raw=$('#urls').value.trim().split(/\s+/).filter(Boolean);
@@ -6042,17 +6217,35 @@ function applyCat(c){const d=(cfg.category_dirs||{})[c]||cfg.last_dir||cfg.dir||
 $('#iCat').onchange=()=>applyCat($('#iCat').value);
 $('#iName').oninput=()=>setIc($('#iName').value);
 $('#iBrowse').onclick=async()=>{try{const r=await api('/api/browse_dir',{initial:$('#iDir').value});if(r.dir)$('#iDir').value=r.dir}catch(e){$('#err').textContent=e.message}};
-function closeSelf(){try{const inv=(window.__TAURI__&&window.__TAURI__.core&&window.__TAURI__.core.invoke)||(window.__TAURI_INTERNALS__&&window.__TAURI_INTERNALS__.invoke);if(inv){inv('close_win');return;}}catch(e){}window.close()}
-$('#iCancel').onclick=()=>closeSelf();
+function closeSelf(showMain,tab){
+ try{
+  fetch('/api/popup/close',{method:'POST',headers:{'X-Token':T,'Content-Type':'application/json'},body:JSON.stringify({kind:'download',show_main:!!showMain,tab:tab||''}),keepalive:true}).catch(()=>{});
+ }catch(e){}
+ try{
+  const gw=window.__TAURI__&&window.__TAURI__.window&&window.__TAURI__.window.getCurrentWindow;
+  if(gw){const w=gw();if(w&&w.destroy)w.destroy().catch(()=>{if(w.close)w.close().catch(()=>{})});}
+ }catch(e){}
+ try{
+  const inv=(window.__TAURI__&&window.__TAURI__.core&&window.__TAURI__.core.invoke)||(window.__TAURI_INTERNALS__&&window.__TAURI_INTERNALS__.invoke);
+  if(inv){Promise.resolve(inv('close_win')).catch(()=>window.close());}
+ }catch(e){}
+ setTimeout(()=>{try{window.close()}catch(e){}},120);
+}
+$('#iCancel').onclick=()=>closeSelf(false,'');
 const go=async(startNow)=>{
+ $('#iStart').disabled=true;$('#iLater').disabled=true;$('#iCancel').disabled=true;
+ $('#err').textContent='';
  try{
   await api('/api/add_single',{
    url:$('#iUrl').value.trim(),dir:$('#iDir').value.trim(),filename:$('#iName').value.trim(),
    headers:hdrs,start_now:startNow,category:$('#iCat').value,
    remember_cat:$('#iRemCat').checked,desc:$('#iDesc').value.trim()
   });
-  closeSelf();
- }catch(e){$('#err').textContent=e.message}
+  closeSelf(!!startNow, startNow?'active':'');
+ }catch(e){
+  $('#err').textContent=e.message;
+  $('#iStart').disabled=false;$('#iLater').disabled=false;$('#iCancel').disabled=false;
+ }
 };
 $('#iStart').onclick=()=>go(true);
 $('#iLater').onclick=()=>go(false);
@@ -6113,7 +6306,20 @@ input{width:100%;border:1px solid var(--ln);background:var(--bg);border-radius:1
 <div id="res"></div>
 <script>
 const T="__TOKEN__",VID="__VID__",$=s=>document.querySelector(s);
-function closeSelf(){try{const inv=(window.__TAURI__&&window.__TAURI__.core&&window.__TAURI__.core.invoke)||(window.__TAURI_INTERNALS__&&window.__TAURI_INTERNALS__.invoke);if(inv){inv('close_win');return;}}catch(e){}window.close()}
+function closeSelf(showMain,tab){
+ try{
+  fetch('/api/popup/close',{method:'POST',headers:{'X-Token':T,'Content-Type':'application/json'},body:JSON.stringify({kind:'video',show_main:!!showMain,tab:tab||''}),keepalive:true}).catch(()=>{});
+ }catch(e){}
+ try{
+  const gw=window.__TAURI__&&window.__TAURI__.window&&window.__TAURI__.window.getCurrentWindow;
+  if(gw){const w=gw();if(w&&w.destroy)w.destroy().catch(()=>{if(w.close)w.close().catch(()=>{})});}
+ }catch(e){}
+ try{
+  const inv=(window.__TAURI__&&window.__TAURI__.core&&window.__TAURI__.core.invoke)||(window.__TAURI_INTERNALS__&&window.__TAURI_INTERNALS__.invoke);
+  if(inv){Promise.resolve(inv('close_win')).catch(()=>window.close());}
+ }catch(e){}
+ setTimeout(()=>{try{window.close()}catch(e){}},120);
+}
 const api=async(p,b)=>{const r=await fetch(p,{method:b===undefined?'GET':'POST',headers:{'X-Token':T,'Content-Type':'application/json'},body:b===undefined?undefined:JSON.stringify(b)});const j=await r.json().catch(()=>({}));if(!r.ok)throw new Error(j.error||'حدث خطأ');return j};
 const B=n=>{if(n<0||n===undefined||n===null)return'—';const u=['بايت','ك.ب','م.ب','ج.ب','ت.ب'];let i=0;while(n>=1024&&i<4){n/=1024;i++}return(i?n.toFixed(n<10?2:1):Math.round(n))+' '+u[i]};
 const D=s=>{s=Math.round(s);const h=s/3600|0,m=s%3600/60|0,x=s%60,p=v=>String(v).padStart(2,'0');return h?`${h}:${p(m)}:${p(x)}`:`${p(m)}:${p(x)}`};
@@ -6144,7 +6350,7 @@ $('#vBrowse').onclick=async()=>{try{const r=await api('/api/browse_dir',{initial
    b.disabled=true;
    try{
     await api('/api/media/add',{url:info.url,title:info.title,format_id:f.format_id,audio_only:f.audio_only,ext:f.ext,size:f.size,headers:d.headers||{},yt_clients:f.yt_clients||null,dir:$('#vDir').value.trim()});
-    closeSelf();
+    closeSelf(true,'active');
    }catch(e){$('#msg').className='er';$('#msg').textContent=e.message;b.disabled=false}
   });
  }catch(e){
