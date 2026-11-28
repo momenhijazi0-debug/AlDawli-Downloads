@@ -1,6 +1,7 @@
 {
   "version": "10.25",
-  "notes": "إضافة عداد المستخدمين المتصلين حالياً، وعزل جلسات WebView2 عن متصفح Edge لمنع الإغلاق عند إغلاق المتصفح.",
+  "notes": "نسخة Tauri 2 المستقلة بالكامل + دليل ربط المتصفح + عداد المتصلين + دعم التحديث السريع والكامل تلقائياً.",
   "url": "https://raw.githubusercontent.com/momenhijazi0-debug/AlDawli-Downloads/main/aldawli.py",
-  "setup_url": "https://github.com/momenhijazi0-debug/AlDawli-Downloads/releases/latest/download/AlDawli_Setup.exe"
+  "setup_url": "https://github.com/momenhijazi0-debug/AlDawli-Downloads/releases/latest/download/AlDawli_Setup.exe",
+  "full_setup": false
 }
