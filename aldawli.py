@@ -73,10 +73,96 @@ def app_dir():
     return Path(sys.executable).resolve().parent if getattr(sys, "frozen", False) else Path(__file__).resolve().parent
 
 
+# ====================== جسر التواصل مع Tauri 2 ======================
+TAURI_MODE = os.environ.get("ALDAWLI_TAURI_MODE") == "1"
+_TAURI_STDOUT_LOCK = threading.Lock()
+
+
+def _app_launcher_exe():
+    """إرجاع مسار ملف تشغيل Tauri الرئيسي (AlDawli.exe) إن كان التطبيق يعمل داخل Tauri."""
+    p = (os.environ.get("ALDAWLI_TAURI_EXE") or "").strip()
+    if p:
+        try:
+            fp = Path(p).resolve()
+            if fp.exists():
+                return fp
+        except Exception:
+            pass
+    return None
+
+
+def _tauri_emit(event_name, **payload):
+    """إرسال حدث JSON منظم إلى تطبيق Tauri عبر stdout (بترميز ASCII خالص لتفادي مشاكل الترميز في ويندوز)."""
+    if not TAURI_MODE:
+        return False
+    msg = {"event": event_name}
+    msg.update(payload)
+    line = "ALDAWLI_EVENT:" + json.dumps(msg, ensure_ascii=True) + "\n"
+    with _TAURI_STDOUT_LOCK:
+        try:
+            out = sys.stdout
+            if out is not None:
+                out.write(line)
+                out.flush()
+                return True
+        except Exception:
+            pass
+    return False
+
+
+def _is_pid_alive(pid):
+    if not pid or pid <= 0:
+        return True
+    if platform.system() == "Windows":
+        try:
+            SYNCHRONIZE = 0x00100000
+            WAIT_TIMEOUT = 0x00000102
+            k32 = ctypes.windll.kernel32
+            h = k32.OpenProcess(SYNCHRONIZE, False, int(pid))
+            if not h:
+                return False
+            try:
+                return k32.WaitForSingleObject(h, 0) == WAIT_TIMEOUT
+            finally:
+                k32.CloseHandle(h)
+        except Exception:
+            return True
+    try:
+        os.kill(int(pid), 0)
+        return True
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    except Exception:
+        return True
+
+
+def _start_parent_watchdog(parent_pid):
+    if not parent_pid or parent_pid <= 0:
+        return
+    def _watch():
+        while True:
+            time.sleep(2.0)
+            if not _is_pid_alive(parent_pid):
+                try:
+                    if MGR:
+                        MGR.shutdown()
+                except Exception:
+                    pass
+                os._exit(0)
+    threading.Thread(target=_watch, daemon=True).start()
+
+
 def ensure_icon_file():
-    here_ico = app_dir() / "icon.ico"
-    if here_ico.exists():
-        return here_ico
+    tauri_exe = _app_launcher_exe()
+    for cand in (
+        app_dir() / "icon.ico",
+        (tauri_exe.parent / "icon.ico") if tauri_exe else None,
+        (tauri_exe.parent / "icons" / "icon.ico") if tauri_exe else None,
+    ):
+        if cand and cand.exists():
+            return cand
     APP.mkdir(parents=True, exist_ok=True)
     cached_ico = APP / "icon.ico"
     if not cached_ico.exists():
@@ -160,6 +246,9 @@ def _set_window_identity(hwnd, app_id, relaunch_cmd, icon_res, display_name):
 
 
 def _relaunch_command():
+    tauri_exe = _app_launcher_exe()
+    if tauri_exe:
+        return f'"{tauri_exe}"'
     if getattr(sys, "frozen", False):
         return f'"{Path(sys.executable).resolve()}"'
     py_exe = Path(sys.executable).resolve()
@@ -360,7 +449,10 @@ def register_magnet_protocol():
         raise RuntimeError("تسجيل بروتوكول Magnet مدعوم على نظام Windows فقط")
     import winreg
     ico_path = str(ensure_icon_file())
-    if getattr(sys, "frozen", False):
+    tauri_exe = _app_launcher_exe()
+    if tauri_exe:
+        cmd_str = f'"{tauri_exe}" --magnet "%1"'
+    elif getattr(sys, "frozen", False):
         cmd_str = f'"{Path(sys.executable).resolve()}" --magnet "%1"'
     else:
         py_exe = Path(sys.executable).resolve()
@@ -414,7 +506,10 @@ def set_windows_autostart(enable=True):
     run_key = r"Software\Microsoft\Windows\CurrentVersion\Run"
     with winreg.CreateKey(winreg.HKEY_CURRENT_USER, run_key) as k:
         if enable:
-            if getattr(sys, "frozen", False):
+            tauri_exe = _app_launcher_exe()
+            if tauri_exe:
+                cmd_str = f'"{tauri_exe}" --no-window'
+            elif getattr(sys, "frozen", False):
                 cmd_str = f'"{Path(sys.executable).resolve()}" --no-window'
             else:
                 py_exe = Path(sys.executable).resolve()
@@ -444,6 +539,9 @@ def is_windows_autostart_enabled():
 
 def show_or_open_main_window():
     """إظهار نافذة الدولي للتحميلات في المقدمة إن كانت مفتوحة، أو فتحها تلقائيًا إن كانت مغلقة."""
+    if TAURI_MODE:
+        _tauri_emit("show_main")
+        return True
     if _webview_show_main():
         return True
     if platform.system() == "Windows":
@@ -832,6 +930,16 @@ def bring_title_to_front(title_substr, topmost=False):
 def open_popup_window(pid):
     """فتح نافذة منبثقة صغيرة ومستقلة أمام المتصفح مباشرة لاختيار مكان الحفظ."""
     url = f"http://127.0.0.1:{CURRENT_PORT}/popup?pid={pid}"
+    if TAURI_MODE:
+        _tauri_emit(
+            "open_popup",
+            label=f"popup-{pid}",
+            url=url,
+            title="معلومات ملف التحميل — الدولي",
+            width=630,
+            height=570,
+        )
+        return True
     if _webview_popup(url, "معلومات ملف التحميل — الدولي", 630, 570):
         return True
     exe = _find_chromium_exe()
@@ -856,6 +964,16 @@ def open_popup_window(pid):
 def open_video_popup_window(vid):
     """فتح نافذة منبثقة صغيرة أمام المتصفح مباشرة لاختيار جودة الفيديو ومكان الحفظ."""
     url = f"http://127.0.0.1:{CURRENT_PORT}/vpopup?vid={vid}"
+    if TAURI_MODE:
+        _tauri_emit(
+            "open_popup",
+            label=f"vpopup-{vid}",
+            url=url,
+            title="تحميل فيديو — الدولي",
+            width=680,
+            height=580,
+        )
+        return True
     if _webview_popup(url, "تحميل فيديو — الدولي", 680, 580):
         return True
     exe = _find_chromium_exe()
@@ -898,7 +1016,12 @@ def create_desktop_shortcut():
         raise RuntimeError("إنشاء الاختصار التلقائي مدعوم على نظام Windows فقط")
     here = app_dir()
     ico_path = str(ensure_icon_file())
-    if getattr(sys, "frozen", False):
+    tauri_exe = _app_launcher_exe()
+    if tauri_exe:
+        target_path = str(tauri_exe)
+        here = tauri_exe.parent
+        arguments = ""
+    elif getattr(sys, "frozen", False):
         target_path = str(Path(sys.executable).resolve())
         arguments = ""
     else:
@@ -1055,10 +1178,145 @@ def has_ytdlp_ejs():
         return False
 
 
+def _bundled_dirs():
+    dirs = [app_dir(), app_dir() / "bin", app_dir().parent / "bin", APP]
+    te = _app_launcher_exe()
+    if te:
+        dirs = [
+            te.parent / "resources" / "engine",
+            te.parent / "engine",
+            te.parent / "bin",
+            te.parent,
+        ] + dirs
+    out, seen = [], set()
+    for d in dirs:
+        try:
+            k = str(d.resolve())
+        except Exception:
+            k = str(d)
+        if k not in seen:
+            seen.add(k)
+            out.append(d)
+    return out
+
+
+def find_ext_dir():
+    """البحث عن مجلد إضافة المتصفح (aldawli-ext) المرفق مع البرنامج."""
+    cands = []
+    for d in _bundled_dirs():
+        cands.append(d / "aldawli-ext")
+    try:
+        cands.append(app_dir().parent / "aldawli-ext")
+    except Exception:
+        pass
+    for c in cands:
+        try:
+            if (c / "manifest.json").exists():
+                return c.resolve()
+        except Exception:
+            continue
+    return None
+
+
+def open_ext_folder():
+    d = find_ext_dir()
+    if not d:
+        raise IOError("لم يتم العثور على مجلد الإضافة (aldawli-ext) بجانب ملفات البرنامج.")
+    s = platform.system()
+    if s == "Windows":
+        subprocess.Popen(["explorer", "/select,", str(d)])
+    elif s == "Darwin":
+        subprocess.Popen(["open", "-R", str(d)])
+    else:
+        subprocess.Popen(["xdg-open", str(d)])
+    return {"ok": True, "path": str(d)}
+
+
+def _find_specific_browser(kind):
+    kind = (kind or "chrome").lower()
+    sysname = platform.system()
+    if sysname == "Windows":
+        rel_map = {
+            "chrome": [r"Google\Chrome\Application\chrome.exe"],
+            "edge": [r"Microsoft\Edge\Application\msedge.exe"],
+            "brave": [r"BraveSoftware\Brave-Browser\Application\brave.exe"],
+        }
+        exe_map = {"chrome": "chrome.exe", "edge": "msedge.exe", "brave": "brave.exe"}
+        cands = []
+        for r in rel_map.get(kind, []):
+            for k in ("PROGRAMFILES", "PROGRAMFILES(X86)", "LOCALAPPDATA"):
+                b = os.environ.get(k)
+                if b:
+                    cands.append(os.path.join(b, r))
+        try:
+            import winreg
+            exe_n = exe_map.get(kind)
+            if exe_n:
+                for hive in (winreg.HKEY_LOCAL_MACHINE, winreg.HKEY_CURRENT_USER):
+                    try:
+                        with winreg.OpenKey(hive, rf"SOFTWARE\Microsoft\Windows\CurrentVersion\App Paths\{exe_n}") as k:
+                            cands.append(winreg.QueryValueEx(k, "")[0])
+                    except OSError:
+                        pass
+        except Exception:
+            pass
+        for c in cands:
+            if c and os.path.exists(c):
+                return c
+    elif sysname == "Darwin":
+        mac_map = {
+            "chrome": "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
+            "edge": "/Applications/Microsoft Edge.app/Contents/MacOS/Microsoft Edge",
+            "brave": "/Applications/Brave Browser.app/Contents/MacOS/Brave Browser",
+        }
+        p = mac_map.get(kind)
+        if p and os.path.exists(p):
+            return p
+    else:
+        lin_map = {
+            "chrome": ("google-chrome", "google-chrome-stable", "chromium"),
+            "edge": ("microsoft-edge",),
+            "brave": ("brave-browser",),
+        }
+        for name in lin_map.get(kind, ()):
+            p = shutil.which(name)
+            if p:
+                return p
+    return None
+
+
+def open_browser_extensions_page(browser="chrome"):
+    browser = (browser or "chrome").lower()
+    url_map = {
+        "chrome": "chrome://extensions",
+        "edge": "edge://extensions",
+        "brave": "brave://extensions",
+    }
+    ext_url = url_map.get(browser, "chrome://extensions")
+    exe = _find_specific_browser(browser)
+    if exe:
+        try:
+            subprocess.Popen([exe, ext_url])
+            return {"ok": True, "opened": True, "url": ext_url, "browser": browser}
+        except Exception:
+            pass
+    return {"ok": True, "opened": False, "url": ext_url, "browser": browser}
+
+
 def find_ffmpeg(force=False):
     if not force and _FFMPEG_CACHE["checked"]:
         return _FFMPEG_CACHE["path"]
-    p = shutil.which("ffmpeg")
+    p = None
+    for d in _bundled_dirs():
+        for name in ("ffmpeg.exe", "ffmpeg"):
+            cand = d / name
+            if cand.exists():
+                p = str(cand)
+                break
+        if p:
+            break
+    if not p:
+        p = shutil.which("ffmpeg")
     if not p:
         here = app_dir()
         cands = [here / "ffmpeg.exe", here / "ffmpeg", APP / "ffmpeg.exe", APP / "ffmpeg"]
@@ -1085,7 +1343,7 @@ def detect_js_runtimes():
     home = Path.home()
     here = app_dir()
     extra_cands = {
-        "deno": [
+        "deno": [d / ("deno.exe" if is_win else "deno") for d in _bundled_dirs()] + [
             here / ("deno.exe" if is_win else "deno"),
             APP / ("deno.exe" if is_win else "deno"),
             home / ".deno" / "bin" / ("deno.exe" if is_win else "deno"),
@@ -1100,7 +1358,18 @@ def detect_js_runtimes():
         "quickjs": [],
     }
     for name in ("deno", "node", "bun", "quickjs"):
-        p = shutil.which(name)
+        p = None
+        if name == "deno":
+            for bd in _bundled_dirs():
+                for bn in ("deno.exe", "deno"):
+                    bc = bd / bn
+                    if bc.exists():
+                        p = str(bc)
+                        break
+                if p:
+                    break
+        if not p:
+            p = shutil.which(name)
         if not p:
             for cand in extra_cands.get(name, []):
                 if cand.exists():
@@ -2542,7 +2811,17 @@ _ARIA2_CACHE = {"checked": False, "path": None}
 def find_aria2(force=False):
     if not force and _ARIA2_CACHE["checked"]:
         return _ARIA2_CACHE["path"]
-    p = shutil.which("aria2c")
+    p = None
+    for d in _bundled_dirs():
+        for name in ("aria2c.exe", "aria2c"):
+            cand = d / name
+            if cand.exists():
+                p = str(cand)
+                break
+        if p:
+            break
+    if not p:
+        p = shutil.which("aria2c")
     if not p:
         here = app_dir()
         cands = [here / "aria2c.exe", here / "aria2c", APP / "aria2c.exe", APP / "aria2c"]
@@ -2975,7 +3254,7 @@ class Manager:
         self.settings = {
             "dir": str(dl if dl.exists() else Path.home()),
             "segments": 8, "max_active": 3, "max_speed": 0,
-            "catbox_userhash": "", "confirm_dialog": True, "show_video_btn": True, "auto_update_ytdlp": True, "ytdlp_last_check": 0, "ext_updated_notice": False, "category_dirs": {}, "last_dir": ""
+            "catbox_userhash": "", "confirm_dialog": True, "show_video_btn": True, "auto_update_ytdlp": True, "ytdlp_last_check": 0, "ext_updated_notice": False, "ext_guide_dismissed": False, "ext_connected_once": False, "category_dirs": {}, "last_dir": ""
         }
         self.items, self.uploads, self.lock, self.slock = {}, {}, threading.RLock(), threading.Lock()
         self._rlock, self._next_time = threading.Lock(), 0.0
@@ -2984,6 +3263,7 @@ class Manager:
         self.pending_video = None
         self.pending_download = None
         self.pending_magnet = None
+        self.ext_last_seen = 0.0
         self.popups = {}
         self.vpopups = {}
         self.aria2 = Aria2Engine(self)
@@ -2994,6 +3274,7 @@ class Manager:
             "notes": "",
             "url": UPDATE_SCRIPT_URL,
             "setup_url": UPDATE_SETUP_URL,
+            "full_setup": False,
             "checking": False,
             "applying": False,
             "msg": "",
@@ -3382,6 +3663,7 @@ class Manager:
                 notes = str(data.get("notes") or "").strip()[:300]
                 dl_url = str(data.get("url") or UPDATE_SCRIPT_URL).strip()
                 setup_url = str(data.get("setup_url") or UPDATE_SETUP_URL).strip()
+                full_setup = bool(data.get("full_setup", False))
                 avail = _ver_tuple(latest) > _ver_tuple(APP_VERSION)
                 self.update_info.update({
                     "latest": latest,
@@ -3389,6 +3671,7 @@ class Manager:
                     "notes": notes,
                     "url": dl_url,
                     "setup_url": setup_url,
+                    "full_setup": full_setup,
                     "msg": f"يتوفر تحديث جديد (v{latest})" if avail else ("أنت تستخدم أحدث إصدار بالفعل!" if manual else ""),
                 })
             except Exception as e:
@@ -3408,20 +3691,39 @@ class Manager:
 
         def run():
             try:
-                # إذا كان المستخدم يشغّل نسخة EXE قديمة (--onefile بدون مجلد _internal)، نرقّيه صامتًا إلى النسخة الجديدة (--onedir)
-                if getattr(sys, "frozen", False) and platform.system() == "Windows" and not (app_dir() / "_internal").exists():
+                need_full_setup = bool(self.update_info.get("full_setup", False))
+                is_legacy_onefile = (
+                    (not TAURI_MODE)
+                    and getattr(sys, "frozen", False)
+                    and platform.system() == "Windows"
+                    and not (app_dir() / "_internal").exists()
+                )
+
+                # الطريقة 1: التحديث الكامل عبر AlDawli_Setup.exe (عند تفعيل full_setup في version.json أو ترقية نسخة قديمة)
+                if platform.system() == "Windows" and (need_full_setup or is_legacy_onefile):
                     setup_url = self.update_info.get("setup_url") or UPDATE_SETUP_URL
                     if setup_url:
-                        self.update_info["msg"] = "جارٍ تنزيل المثبّت الجديد للترقية التلقائية الكاملة..."
+                        self.update_info["msg"] = "جارٍ تنزيل ملف التثبيت الكامل للترقية التلقائية..."
                         sep_s = "&" if "?" in setup_url else "?"
-                        sreq = rq.Request(f"{setup_url}{sep_s}t={int(time.time())}", headers={"User-Agent": UA, "Cache-Control": "no-cache"})
+                        sreq = rq.Request(
+                            f"{setup_url}{sep_s}t={int(time.time())}",
+                            headers={"User-Agent": UA, "Cache-Control": "no-cache"},
+                        )
                         setup_path = Path(tempfile.gettempdir()) / "AlDawli_Setup_Update.exe"
-                        with rq.urlopen(sreq, timeout=120) as sr, open(setup_path, "wb") as sf:
+                        with rq.urlopen(sreq, timeout=180) as sr, open(setup_path, "wb") as sf:
                             shutil.copyfileobj(sr, sf, 1024 * 256)
-                        if setup_path.exists() and setup_path.stat().st_size > 1_000_000 and setup_path.read_bytes()[:2] == b"MZ":
-                            self.update_info["msg"] = "جارٍ تثبيت النسخة الجديدة تلقائيًا..."
+                        if (
+                            setup_path.exists()
+                            and setup_path.stat().st_size > 1_000_000
+                            and setup_path.read_bytes()[:2] == b"MZ"
+                        ):
+                            self.update_info["msg"] = "تم التنزيل! جارٍ تثبيت الإصدار الجديد وإعادة التشغيل..."
                             self.shutdown()
                             _release_single_instance_mutex()
+                            if TAURI_MODE:
+                                _tauri_emit("run_setup", path=str(setup_path))
+                                time.sleep(0.5)
+                                os._exit(0)
                             creationflags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
                             subprocess.Popen(
                                 [str(setup_path), "/VERYSILENT", "/SUPPRESSMSGBOXES", "/NORESTART", "/CLOSEAPPLICATIONS"],
@@ -3429,7 +3731,10 @@ class Manager:
                             )
                             time.sleep(0.4)
                             os._exit(0)
+                        elif need_full_setup:
+                            raise RuntimeError("ملف التثبيت المُنزّل غير صالح أو غير مكتمل.")
 
+                # الطريقة 2: التحديث السريع بتنزيل aldawli.py الجديد فقط (بدون إعادة تثبيت)
                 dl_url = self.update_info.get("url") or UPDATE_SCRIPT_URL
                 sep = "&" if "?" in dl_url else "?"
                 req = rq.Request(f"{dl_url}{sep}t={int(time.time())}", headers={"User-Agent": UA, "Cache-Control": "no-cache"})
@@ -3438,54 +3743,58 @@ class Manager:
                 new_text = new_bytes.decode("utf-8")
                 if "APP_TITLE" not in new_text or "class Manager:" not in new_text:
                     raise RuntimeError("الملف المُنزّل غير صالح.")
+                if TAURI_MODE and "--tauri" not in new_text:
+                    raise RuntimeError("ملف aldawli.py المرفوع على GitHub قديم ولا يدعم نسخة Tauri 2.")
                 compile(new_text, "aldawli_update.py", "exec")
 
-                if getattr(sys, "frozen", False):
-                    base_target = app_dir() / "aldawli.py"
-                    try:
-                        tmp = base_target.with_suffix(".py.new")
-                        tmp.write_bytes(new_bytes)
-                        os.replace(tmp, base_target)
-                        target = base_target
-                        # حذف أي نسخة قديمة في مجلد المستخدم إن نجح التحديث في مجلد التطبيق
-                        (APP / "aldawli.py").unlink(missing_ok=True)
-                    except PermissionError:
-                        APP.mkdir(parents=True, exist_ok=True)
-                        target = APP / "aldawli.py"
-                        tmp = target.with_suffix(".py.new")
-                        tmp.write_bytes(new_bytes)
-                        os.replace(tmp, target)
-                    ext_dir = app_dir() / "aldawli-ext"
+                if TAURI_MODE or getattr(sys, "frozen", False):
+                    # حفظ التحديث في مجلد المستخدم القابل للكتابة دائمًا بدون طلب صلاحيات مسؤول
+                    APP.mkdir(parents=True, exist_ok=True)
+                    target = APP / "aldawli.py"
+                    tmp = target.with_suffix(".py.new")
+                    tmp.write_bytes(new_bytes)
+                    os.replace(tmp, target)
+                    ext_dir = find_ext_dir() or (app_dir() / "aldawli-ext")
                 else:
                     target = Path(__file__).resolve()
                     tmp = target.with_suffix(".py.new")
                     tmp.write_bytes(new_bytes)
                     os.replace(tmp, target)
-                    ext_dir = target.parent / "aldawli-ext"
-                ext_dir.mkdir(parents=True, exist_ok=True)
+                    ext_dir = find_ext_dir() or (target.parent / "aldawli-ext")
+
+                # تحديث ملفات إضافة المتصفح تلقائيًا إن وُجدت تعديلات عليها في GitHub
                 ext_updated = False
-                for ef in ("manifest.json", "background.js", "video_btn.js"):
-                    try:
-                        eurl = f"https://raw.githubusercontent.com/{UPDATE_REPO}/main/aldawli-ext/{ef}?t={int(time.time())}"
-                        ereq = rq.Request(eurl, headers={"User-Agent": UA, "Cache-Control": "no-cache"})
-                        with rq.urlopen(ereq, timeout=15) as er:
-                            ebytes = er.read()
-                        if ebytes:
-                            epath = ext_dir / ef
-                            if not epath.exists() or epath.read_bytes() != ebytes:
-                                epath.write_bytes(ebytes)
-                                ext_updated = True
-                    except Exception:
-                        pass
+                try:
+                    ext_dir.mkdir(parents=True, exist_ok=True)
+                    for ef in ("manifest.json", "background.js", "video_btn.js"):
+                        try:
+                            eurl = f"https://raw.githubusercontent.com/{UPDATE_REPO}/main/aldawli-ext/{ef}?t={int(time.time())}"
+                            ereq = rq.Request(eurl, headers={"User-Agent": UA, "Cache-Control": "no-cache"})
+                            with rq.urlopen(ereq, timeout=15) as er:
+                                ebytes = er.read()
+                            if ebytes:
+                                epath = ext_dir / ef
+                                if not epath.exists() or epath.read_bytes() != ebytes:
+                                    epath.write_bytes(ebytes)
+                                    ext_updated = True
+                        except Exception:
+                            pass
+                except Exception:
+                    pass
                 if ext_updated:
                     self.settings["ext_updated_notice"] = True
                     self.save()
 
                 self.update_info["msg"] = "تم التحديث بنجاح! جارٍ إعادة التشغيل..."
 
-                # إغلاق المحركات وحفظ الحالة وفك القفل ثم إعادة تشغيل السكربت تلقائيًا
+                # إغلاق المحركات وحفظ الحالة ثم إعادة تشغيل التطبيق
                 self.shutdown()
                 _release_single_instance_mutex()
+                if TAURI_MODE:
+                    _tauri_emit("restart")
+                    time.sleep(0.5)
+                    os._exit(0)
+
                 creationflags = getattr(subprocess, "CREATE_NO_WINDOW", 0) if platform.system() == "Windows" else 0
                 extra_args = [] if _WV.get("main") is not None else ["--no-window"]
                 if getattr(sys, "frozen", False):
@@ -3548,7 +3857,19 @@ class Manager:
             "pending_magnet": pm,
             "update": self.update_info,
             "online_users": get_online_users_info(),
+            "ext_status": {
+                "connected": (time.time() - self.ext_last_seen) < 25,
+                "connected_once": bool(self.settings.get("ext_connected_once", False)),
+                "dismissed": bool(self.settings.get("ext_guide_dismissed", False)),
+                "path": str(find_ext_dir() or ""),
+            },
         }
+
+    def mark_ext_seen(self):
+        self.ext_last_seen = time.time()
+        if not self.settings.get("ext_connected_once"):
+            self.settings["ext_connected_once"] = True
+            self.save()
 
     def shutdown(self):
         for i in list(self.items.values()): i.stop.set()
@@ -3589,8 +3910,10 @@ class Handler(BaseHTTPRequestHandler):
             self.send_header("Access-Control-Allow-Origin", self.headers.get("Origin"))
         self.send_header(
             "Content-Security-Policy",
-            "default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; "
-            "connect-src 'self'; manifest-src 'self'; img-src 'self' data: https: http:; media-src 'self' blob: https: http:"
+            "default-src 'none'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; "
+            "connect-src 'self' http://ipc.localhost https://ipc.localhost ipc: tauri:; "
+            "manifest-src 'self'; font-src 'self' data:; "
+            "img-src 'self' data: https: http:; media-src 'self' blob: https: http:"
         )
         self.end_headers(); self.wfile.write(body)
 
@@ -3680,6 +4003,8 @@ class Handler(BaseHTTPRequestHandler):
                     })
         elif clean_path == "/api/ext/config":
             if self.guard(need_token=not self.is_ext_origin()):
+                if self.is_ext_origin():
+                    MGR.mark_ext_seen()
                 self.send_any(200, {"show_video_btn": bool(MGR.settings.get("show_video_btn", True))})
         elif clean_path == "/api/state":
             if self.guard(): self.send_any(200, MGR.state())
@@ -3731,6 +4056,8 @@ class Handler(BaseHTTPRequestHandler):
     def do_POST(self):
         is_ext = self.path in ("/api/ext/add", "/api/ext/video", "/api/ext/torrent") and self.is_ext_origin()
         if not self.guard(need_token=not is_ext): return
+        if is_ext:
+            MGR.mark_ext_seen()
         if self.path == "/api/upload/raw":
             return self._handle_raw_upload()
         try:
@@ -3836,6 +4163,14 @@ class Handler(BaseHTTPRequestHandler):
             elif p == "/api/dismiss_ext_notice":
                 MGR.settings["ext_updated_notice"] = False
                 MGR.save()
+            elif p == "/api/ext/dismiss_guide":
+                MGR.settings["ext_guide_dismissed"] = bool(d.get("dismissed", True))
+                MGR.save()
+                r = {"ok": True}
+            elif p == "/api/ext/open_folder":
+                r = open_ext_folder()
+            elif p == "/api/ext/open_browser":
+                r = open_browser_extensions_page(d.get("browser", "chrome"))
             elif p == "/api/update/check": r = MGR.check_update(manual=True)
             elif p == "/api/update/apply": r = MGR.apply_update()
             elif p == "/api/ext/focus":
@@ -3845,6 +4180,7 @@ class Handler(BaseHTTPRequestHandler):
                 r = start_speedtest_job()
             elif p == "/api/quit":
                 def bye():
+                    _tauri_emit("quit")
                     try:
                         MGR.shutdown()
                     except Exception:
@@ -4231,15 +4567,19 @@ def get_online_users_info():
 
 
 def main():
-    global MGR
+    global MGR, TAURI_MODE, CURRENT_PORT
     ap = argparse.ArgumentParser()
     ap.add_argument("--port", type=int, default=8765)
     ap.add_argument("--no-window", action="store_true")
     ap.add_argument("--browser", action="store_true", help="فتح الواجهة بنافذة Chrome/Edge بدل النافذة المستقلة")
+    ap.add_argument("--tauri", action="store_true", help="تشغيل المحرك في الخلفية لـ Tauri 2 بدون نافذة أو صينية مكررة")
+    ap.add_argument("--parent-pid", type=int, default=0, help="معرّف عملية Tauri الأم لإغلاق المحرك تلقائيًا عند إغلاقها")
     ap.add_argument("--shortcut", action="store_true")
     ap.add_argument("--register-magnet", action="store_true")
     ap.add_argument("--magnet", type=str, default="")
     a = ap.parse_args()
+    if a.tauri:
+        TAURI_MODE = True
     if a.shortcut:
         try:
             lnk = create_desktop_shortcut()
@@ -4257,13 +4597,14 @@ def main():
         except Exception as e:
             print("Failed to register magnet protocol:", e)
             raise SystemExit(1)
-    if a.magnet:
+    if a.magnet and not TAURI_MODE:
         if _send_magnet_to_running(a.magnet, a.port):
             return
-    if not _acquire_single_instance_mutex():
-        if not a.no_window:
-            _try_focus_running_instance(a.port)
-        return
+    if not TAURI_MODE:
+        if not _acquire_single_instance_mutex():
+            if not a.no_window:
+                _try_focus_running_instance(a.port)
+            return
     set_windows_app_id()
     MGR = Manager()
     if a.magnet:
@@ -4272,11 +4613,13 @@ def main():
     for port in range(a.port, a.port + 30):
         try: srv = ThreadingHTTPServer(("127.0.0.1", port), Handler); break
         except OSError: continue
-    if not srv: raise SystemExit("تعذّر العثور على منفذ متاح")
-    global CURRENT_PORT
+    if not srv:
+        _tauri_emit("error", message="تعذّر العثور على منفذ متاح")
+        raise SystemExit("تعذّر العثور على منفذ متاح")
     CURRENT_PORT = port
     url = f"http://127.0.0.1:{port}/"
-    print(f"{APP_TITLE} يعمل على {url}  (اضغط Ctrl+C للإنهاء)")
+    if not TAURI_MODE:
+        print(f"{APP_TITLE} يعمل على {url}  (اضغط Ctrl+C للإنهاء)")
     if platform.system() == "Windows":
         def _clean_old_mei():
             try:
@@ -4292,6 +4635,16 @@ def main():
                 pass
         threading.Thread(target=_clean_old_mei, daemon=True).start()
     _start_presence_heartbeat()
+    if TAURI_MODE:
+        _start_parent_watchdog(a.parent_pid)
+        threading.Thread(target=srv.serve_forever, daemon=True).start()
+        _tauri_emit("ready", port=port, token=TOKEN)
+        try:
+            while True:
+                time.sleep(3600)
+        except (KeyboardInterrupt, SystemExit):
+            MGR.shutdown()
+        return
     start_windows_tray()
     wv = None if a.browser else _import_webview()
     threading.Thread(target=srv.serve_forever, daemon=True).start()
@@ -4453,12 +4806,28 @@ textarea{min-height:120px;resize:vertical;direction:ltr;text-align:left}input.l{
 #toast{position:fixed;bottom:22px;inset-inline:0;margin:auto;width:fit-content;max-width:90vw;background:var(--tx);color:var(--bg);padding:10px 18px;border-radius:12px;opacity:0;pointer-events:none;transition:opacity .2s;z-index:99}
 #toast.on{opacity:1}
 #bye{position:fixed;inset:0;background:var(--bg);display:none;place-items:center;text-align:center}
+.ext-hero{display:flex;align-items:center;gap:14px;padding:14px 16px;border-radius:14px;background:var(--ac2);border:1px solid color-mix(in srgb,var(--ac) 35%,transparent);margin-bottom:14px}
+.ext-hero img{width:46px;height:46px;border-radius:12px;flex-shrink:0}
+.ext-hero h3{margin:0 0 2px;font-size:17px;color:var(--tx)}.ext-hero p{margin:0;font-size:13px;color:var(--mu)}
+.ext-pill{display:inline-flex;align-items:center;gap:7px;padding:4px 12px;border-radius:99px;font-size:12.5px;font-weight:600;margin-bottom:12px;background:color-mix(in srgb,#d98a00 15%,var(--bg));color:#d98a00;border:1px solid color-mix(in srgb,#d98a00 35%,transparent)}
+.ext-pill.ok{background:color-mix(in srgb,var(--ok) 15%,var(--bg));color:var(--ok);border-color:color-mix(in srgb,var(--ok) 40%,transparent)}
+.ext-dot{width:8px;height:8px;border-radius:50%;background:currentColor;display:inline-block}
+.ext-steps{display:flex;flex-direction:column;gap:10px;margin:0;padding:0;list-style:none}
+.ext-step{display:grid;grid-template-columns:30px 1fr;gap:12px;align-items:start;padding:11px 13px;border-radius:12px;background:var(--bg);border:1px solid var(--ln)}
+.ext-num{width:30px;height:30px;border-radius:50%;background:var(--ac);color:#fff;font-weight:700;font-size:13.5px;display:grid;place-items:center;flex-shrink:0}
+@media(prefers-color-scheme:dark){.ext-num{color:#0b1020}}
+.ext-step b{display:block;font-size:14px;margin-bottom:2px}.ext-step small{display:block;color:var(--mu);font-size:12.5px;line-height:1.55}
+.ext-acts{display:flex;gap:7px;flex-wrap:wrap;margin-top:8px}
+.ext-path{display:flex;gap:6px;align-items:center;margin-top:8px}
+.ext-path input{flex:1;font-size:12.5px;padding:7px 10px;direction:ltr;text-align:left}
+.nav .dot-ok{width:8px;height:8px;border-radius:50%;background:var(--ok);margin-inline-start:auto;display:inline-block}
+.nav .dot-warn{width:8px;height:8px;border-radius:50%;background:#d98a00;margin-inline-start:auto;display:inline-block}
 :focus-visible{outline:2px solid var(--ac);outline-offset:2px}
 @media(max-width:720px){.app{grid-template-columns:1fr}aside{display:none}}
 </style></head><body>
 <div class="app">
 <aside>
- <div class="brand"><img class="logo-img" src="/icon.png?v=3" alt="الدولي للتحميلات"><div><b>الدولي للتحميلات</b><small>الإصدار <span id="appVer">10.25</span></small></div></div>
+ <div class="brand"><img class="logo-img" src="/icon.png?v=3" alt="الدولي للتحميلات"><div><b>الدولي للتحميلات</b><small>الإصدار <span id="appVer">10.26</span></small></div></div>
  <button class="nav" data-f="video"><span data-ic="video"></span>تحميل فيديو</button>
  <button class="nav" data-f="upload"><span data-ic="upload"></span>مركز الرفع<em id="c-upload">0</em></button>
  <button class="nav" data-f="torrent"><span data-ic="magnet"></span>التورنت<em id="c-torrent">0</em></button>
@@ -4471,6 +4840,7 @@ textarea{min-height:120px;resize:vertical;direction:ltr;text-align:left}input.l{
  <div class="sp"></div>
  <div class="speed" style="display:flex;align-items:center;justify-content:space-between;padding:9px 12px"><small style="margin:0">المتصلون الآن</small><b id="onlineCnt" style="font-size:15px;color:var(--ok)">1</b></div>
 <div class="speed"><small>السرعة الإجمالية</small><b id="spd">0 بايت/ث</b><span class="cap" id="spdCap"></span></div>
+ <button class="nav" id="bExtGuide"><span data-ic="ext"></span>ربط المتصفح<span id="extDot" class="dot-warn" title="الإضافة غير مفعّلة بعد"></span></button>
  <button class="nav" id="bSet"><span data-ic="set"></span>الإعدادات</button>
  <button class="nav" id="bQuit"><span data-ic="power"></span>إنهاء التطبيق</button>
 </aside>
@@ -4641,6 +5011,7 @@ textarea{min-height:120px;resize:vertical;direction:ltr;text-align:left}input.l{
  <label class="ucheck" style="margin-top:8px"><input type="checkbox" id="sYtdlp"><span>تحديث محرك الفيديو (yt-dlp) تلقائيًا عند توفر إصدار جديد</span></label>
  <div class="row">
   <button class="btn pri" id="okSet">حفظ</button>
+  <button class="btn" id="bOpenExtGuide">تفعيل إضافة المتصفح (Chrome / Edge)</button>
   <button class="btn" id="bDeskSc">إنشاء اختصار على سطح المكتب</button>
   <button class="btn" id="bRegMag">تعيين كبرنامج افتراضي للـ Magnet</button>
   <button class="btn" id="bChkUpd">التحقق من التحديثات</button>
@@ -4724,6 +5095,61 @@ textarea{min-height:120px;resize:vertical;direction:ltr;text-align:left}input.l{
  </div>
 </dialog>
 
+
+<dialog id="dExtGuide" style="width:min(650px,95vw)">
+ <div class="ext-hero">
+  <img src="/icon.png?v=3" alt="">
+  <div>
+   <h3>تفعيل إضافة الدولي للتحميلات في المتصفح</h3>
+   <p>فعّل الإضافة مرة واحدة فقط لالتقاط التنزيلات وروابط الفيديوهات من Chrome أو Edge تلقائيًا مثل IDM.</p>
+  </div>
+ </div>
+ <div id="extPill" class="ext-pill"><span class="ext-dot"></span><span id="extPillTxt">بانتظار تفعيل الإضافة في المتصفح...</span></div>
+ <ol class="ext-steps">
+  <li class="ext-step">
+   <span class="ext-num">1</span>
+   <div>
+    <b>افتح صفحة إدارة الإضافات في متصفحك</b>
+    <small>اضغط على متصفحك لفتح صفحة الإضافات مباشرة (أو انسخ الرابط والصقه في شريط العنوان واضغط Enter):</small>
+    <div class="ext-acts">
+     <button class="btn pri" type="button" data-open-br="chrome" style="padding:6px 12px;font-size:13px">فتح إضافات Chrome</button>
+     <button class="btn" type="button" data-open-br="edge" style="padding:6px 12px;font-size:13px">فتح إضافات Edge</button>
+     <button class="btn" type="button" data-open-br="brave" style="padding:6px 12px;font-size:13px">فتح إضافات Brave</button>
+    </div>
+   </div>
+  </li>
+  <li class="ext-step">
+   <span class="ext-num">2</span>
+   <div>
+    <b>فعّل خيار «وضع مطور البرامج» (Developer mode)</b>
+    <small>في أعلى زاوية صفحة الإضافات بالمتصفح، اضغط على زر التبديل بجانب <b>Developer mode / وضع مطور البرامج</b> حتى يصبح مفعّلاً.</small>
+   </div>
+  </li>
+  <li class="ext-step">
+   <span class="ext-num">3</span>
+   <div>
+    <b>أضف مجلد الإضافة «aldawli-ext» (سحب وإفلات أو اختيار المجلد)</b>
+    <small>اضغط <b>فتح مجلد الإضافة</b> ثم اسحب مجلد <b>aldawli-ext</b> وأفلته مباشرة داخل صفحة الإضافات — أو اضغط <b>Load unpacked / تحميل إضافة غير مضغوطة</b> والصق المسار أدناه:</small>
+    <div class="ext-path">
+     <input id="extPathInp" readonly placeholder="جارٍ تحديد المسار...">
+     <button class="btn" type="button" id="bCopyExtPath" style="padding:6px 11px;font-size:12.5px">نسخ المسار</button>
+     <button class="btn pri" type="button" id="bOpenExtDir" style="padding:6px 11px;font-size:12.5px">فتح مجلد الإضافة</button>
+    </div>
+   </div>
+  </li>
+  <li class="ext-step">
+   <span class="ext-num">4</span>
+   <div>
+    <b>منح الصلاحية والتأكد من التفعيل</b>
+    <small>تأكد أن الإضافة <b>مفعّلة (مفتاح التشغيل أزرق)</b>. بمجرد تفعيلها سيقرأ البرنامج الاتصال تلقائيًا ويتحول المؤشر أعلاه إلى الأخضر خلال ثوانٍ!</small>
+   </div>
+  </li>
+ </ol>
+ <div class="row" style="align-items:center;justify-content:space-between;margin-top:16px">
+  <label class="ucheck" style="margin:0;padding:6px 11px"><input type="checkbox" id="extNoAuto"><span style="font-size:12.5px">عدم إظهار هذه النافذة تلقائيًا مرة أخرى</span></label>
+  <button class="btn pri" type="button" id="bCloseExtGuide">تم، إغلاق</button>
+ </div>
+</dialog>
 
 <div id="toast"></div><div id="bye"><div><h2>تم إنهاء الدولي للتحميلات</h2><p>يمكنك إغلاق هذه النافذة.</p></div></div>
 <script>
@@ -5180,6 +5606,7 @@ function render(){
  renderTorrents();
  renderUpdate();
  $('#extBar').style.display=(S.settings&&S.settings.ext_updated_notice)?'flex':'none';
+ renderExtGuide();
  if(flt==='video'||flt==='upload'||flt==='torrent'||flt==='soon'||flt==='speedtest')return;
  const vis=S.items.filter(F[flt]),ids=new Set(vis.map(i=>i.id)),list=$('#list');
  for(const[id,el]of els)if(!ids.has(id)){el.remove();els.delete(id)}
@@ -5416,7 +5843,8 @@ $('#okAdd').onclick=async()=>{
  try{const r=await api('/api/add',{urls:raw});$('#dAdd').close();
  toast(r.errors.length?`تم تجاهل ${r.errors.length} رابط غير صالح (يلزم http أو https)`:`أُضيف ${r.added} إلى القائمة`);tick(true)}catch(e){toast(e.message)}
 };
-document.addEventListener('click',e=>{const a=e.target.closest&&e.target.closest('a[target="_blank"]');if(a&&window.pywebview&&window.pywebview.api&&window.pywebview.api.open_external){e.preventDefault();window.pywebview.api.open_external(a.href)}});
+const _tauriInvoke=(cmd,args)=>{try{const inv=(window.__TAURI__&&window.__TAURI__.core&&window.__TAURI__.core.invoke)||(window.__TAURI_INTERNALS__&&window.__TAURI_INTERNALS__.invoke);if(inv)return inv(cmd,args||{});}catch(e){}return null;};
+document.addEventListener('click',e=>{const a=e.target.closest&&e.target.closest('a[target="_blank"]');if(a&&a.href){const p=_tauriInvoke('open_external',{url:a.href});if(p){e.preventDefault();p.catch(()=>{});}}});
 document.addEventListener('paste',e=>{if($('dialog[open]')||/INPUT|TEXTAREA/.test(document.activeElement.tagName))return;
  const t=(e.clipboardData.getData('text')||'').trim();if(/^(https?:\/\/|magnet:\?)/i.test(t))openAdd(t)});
 
@@ -5428,13 +5856,72 @@ $('#bDoUpd').onclick=async()=>{
  try{
   await api('/api/update/apply',{});
   toast('جارٍ تنزيل التحديث وإعادة تشغيل التطبيق...');
-  setTimeout(()=>location.reload(), 4000);
+  const isTauri=!!((window.__TAURI__&&window.__TAURI__.core)||(window.__TAURI_INTERNALS__&&window.__TAURI_INTERNALS__.invoke));
+  if(!isTauri)setTimeout(()=>location.reload(), 4000);
  }catch(e){toast(e.message)}
 };
 $('#bRegMag').onclick=async()=>{try{const r=await api('/api/register_magnet',{});toast(r.locked_by_other?'تم التسجيل! اختر «الدولي للتحميلات» لبروتوكول MAGNET من نافذة إعدادات ويندوز التي فُتحت الآن.':'تم تعيين الدولي للتحميلات كبرنامج افتراضي لروابط Magnet بنجاح!')}catch(e){toast(e.message)}};
 $('#bDeskSc').onclick=async()=>{try{await api('/api/create_shortcut',{});toast('تم إنشاء اختصار «الدولي للتحميلات» على سطح المكتب!')}catch(e){toast(e.message)}};
 $('#bDisExt').onclick=()=>act('/api/dismiss_ext_notice');
-$('#bQuit').onclick=async()=>{try{await api('/api/quit',{})}catch(e){}$('#bye').style.display='grid'};
+let extGuideAutoShown=false;
+function openExtGuideModal(){
+ const es=(S&&S.ext_status)||{};
+ $('#extPathInp').value=es.path||'مجلد aldawli-ext بجانب البرنامج';
+ $('#extNoAuto').checked=!!es.dismissed;
+ updateExtGuideBadge();
+ if(!$('#dExtGuide').open)$('#dExtGuide').showModal();
+}
+function updateExtGuideBadge(){
+ const es=(S&&S.ext_status)||{};
+ const ok=!!es.connected;
+ const dot=$('#extDot');
+ if(dot){dot.className=ok?'dot-ok':'dot-warn';dot.title=ok?'إضافة المتصفح متصلة وشغّالة':'الإضافة غير مفعّلة بعد — اضغط للتفعيل'}
+ const pill=$('#extPill'),pt=$('#extPillTxt');
+ if(pill&&pt){
+  pill.classList.toggle('ok',ok);
+  pt.textContent=ok?'تم الربط مع إضافة المتصفح بنجاح! جاهز لالتقاط التنزيلات والفيديوهات ✓':'بانتظار تفعيل الإضافة في المتصفح...';
+ }
+ if(es.path && !$('#extPathInp').value)$('#extPathInp').value=es.path;
+}
+function renderExtGuide(){
+ updateExtGuideBadge();
+ const es=(S&&S.ext_status)||{};
+ if(!extGuideAutoShown && !es.connected && !es.connected_once && !es.dismissed && !$('dialog[open]')){
+  extGuideAutoShown=true;
+  setTimeout(()=>{
+   const cur=(S&&S.ext_status)||{};
+   if(!cur.connected && !cur.connected_once && !cur.dismissed && !$('dialog[open]'))openExtGuideModal();
+  }, 1200);
+ }
+}
+$('#bExtGuide').onclick=openExtGuideModal;
+$('#bOpenExtGuide').onclick=()=>{$('#dSet').close();openExtGuideModal()};
+$('#bCloseExtGuide').onclick=async()=>{
+ const dis=$('#extNoAuto').checked;
+ $('#dExtGuide').close();
+ try{await api('/api/ext/dismiss_guide',{dismissed:dis})}catch(e){}
+};
+$('#bCopyExtPath').onclick=()=>{
+ const p=$('#extPathInp').value.trim();
+ if(!p||p.startsWith('مجلد ')){toast('لم يتم العثور على المسار تلقائيًا');return}
+ copyTxt(p,'تم نسخ مسار مجلد الإضافة! الصقه عند اختيار المجلد.');
+};
+$('#bOpenExtDir').onclick=async()=>{
+ try{
+  const r=await api('/api/ext/open_folder',{});
+  if(r.path)$('#extPathInp').value=r.path;
+  toast('تم فتح مجلد الإضافة — اسحب مجلد aldawli-ext إلى المتصفح!');
+ }catch(e){toast(e.message)}
+};
+document.querySelectorAll('[data-open-br]').forEach(b=>b.onclick=async()=>{
+ const br=b.dataset.openBr;
+ try{
+  const r=await api('/api/ext/open_browser',{browser:br});
+  if(r.opened){toast('تم فتح صفحة الإضافات في المتصفح!')}
+  else{copyTxt(r.url,`تم نسخ ${r.url} — افتح المتصفح والصقه في شريط العنوان واضغط Enter.`)}
+ }catch(e){toast(e.message)}
+});
+$('#bQuit').onclick=async()=>{const p=_tauriInvoke('quit_app',{});if(p){try{await p;return}catch(e){}}try{await api('/api/quit',{})}catch(e){}$('#bye').style.display='grid'};
 
 const PHASE_AR={idle:'جاهز للاختبار',ping:'جارٍ قياس زمن الاستجابة (Ping)...',download:'جارٍ قياس سرعة التنزيل الفعلية...',upload:'جارٍ قياس سرعة الرفع الفعلية...',done:'اكتمل القياس بنجاح!',error:'حدث خطأ أثناء القياس'};
 const fmtMbps=bps=>((Number(bps||0)*8)/1e6).toFixed(2)+' Mbps';
@@ -5555,7 +6042,7 @@ function applyCat(c){const d=(cfg.category_dirs||{})[c]||cfg.last_dir||cfg.dir||
 $('#iCat').onchange=()=>applyCat($('#iCat').value);
 $('#iName').oninput=()=>setIc($('#iName').value);
 $('#iBrowse').onclick=async()=>{try{const r=await api('/api/browse_dir',{initial:$('#iDir').value});if(r.dir)$('#iDir').value=r.dir}catch(e){$('#err').textContent=e.message}};
-function closeSelf(){try{if(window.pywebview&&window.pywebview.api&&window.pywebview.api.close_win)return window.pywebview.api.close_win()}catch(e){}window.close()}
+function closeSelf(){try{const inv=(window.__TAURI__&&window.__TAURI__.core&&window.__TAURI__.core.invoke)||(window.__TAURI_INTERNALS__&&window.__TAURI_INTERNALS__.invoke);if(inv){inv('close_win');return;}}catch(e){}window.close()}
 $('#iCancel').onclick=()=>closeSelf();
 const go=async(startNow)=>{
  try{
@@ -5626,7 +6113,7 @@ input{width:100%;border:1px solid var(--ln);background:var(--bg);border-radius:1
 <div id="res"></div>
 <script>
 const T="__TOKEN__",VID="__VID__",$=s=>document.querySelector(s);
-function closeSelf(){try{if(window.pywebview&&window.pywebview.api&&window.pywebview.api.close_win)return window.pywebview.api.close_win()}catch(e){}window.close()}
+function closeSelf(){try{const inv=(window.__TAURI__&&window.__TAURI__.core&&window.__TAURI__.core.invoke)||(window.__TAURI_INTERNALS__&&window.__TAURI_INTERNALS__.invoke);if(inv){inv('close_win');return;}}catch(e){}window.close()}
 const api=async(p,b)=>{const r=await fetch(p,{method:b===undefined?'GET':'POST',headers:{'X-Token':T,'Content-Type':'application/json'},body:b===undefined?undefined:JSON.stringify(b)});const j=await r.json().catch(()=>({}));if(!r.ok)throw new Error(j.error||'حدث خطأ');return j};
 const B=n=>{if(n<0||n===undefined||n===null)return'—';const u=['بايت','ك.ب','م.ب','ج.ب','ت.ب'];let i=0;while(n>=1024&&i<4){n/=1024;i++}return(i?n.toFixed(n<10?2:1):Math.round(n))+' '+u[i]};
 const D=s=>{s=Math.round(s);const h=s/3600|0,m=s%3600/60|0,x=s%60,p=v=>String(v).padStart(2,'0');return h?`${h}:${p(m)}:${p(x)}`:`${p(m)}:${p(x)}`};
